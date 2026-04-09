@@ -230,22 +230,29 @@ int run_benchmark(const CliOptions& options) {
     }
 
     const std::vector<std::string> docs = load_docs(options.dataset);
+    if (docs.empty()) {
+        throw std::runtime_error("dataset is empty");
+    }
     const auto [uchars, vocab] = build_vocab(docs);
     BenchmarkPreset preset = preset_it->second;
     preset.config.vocab_size = static_cast<int>(uchars.size()) + 1;
-    const int steps = options.num_steps >= 0 ? options.num_steps : preset.steps;
-    const std::vector<int> tokens = encode_doc(options.sample_name, vocab, static_cast<int>(uchars.size()));
+    const int requested_steps = options.num_steps >= 0 ? options.num_steps : preset.steps;
+    const int steps = std::min(requested_steps, static_cast<int>(docs.size()));
     const Model model = initialize_model(preset.config, options.seed);
 
     double last_loss = 0.0;
+    std::string last_doc;
     for (int step = 0; step < steps; ++step) {
+        last_doc = docs[step];
+        const std::vector<int> tokens = encode_doc(last_doc, vocab, static_cast<int>(uchars.size()));
         last_loss = run_forward_backward(model, tokens).loss;
     }
 
     std::cout << "mode=benchmark "
               << "preset=" << options.preset << ' '
+              << "requested_steps=" << requested_steps << ' '
               << "steps=" << steps << ' '
-              << "sample_name=" << options.sample_name << ' '
+              << "last_doc=" << last_doc << ' '
               << "loss=" << std::setprecision(8) << last_loss << '\n';
     return 0;
 }

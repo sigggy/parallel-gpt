@@ -3,35 +3,38 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <numeric>
 #include <random>
 #include <stdexcept>
 
 namespace {
 
-struct LayerCache {
+struct LayerStepCache {
     std::vector<double> x_in;
     std::vector<double> x_norm1;
     std::vector<double> q;
     std::vector<double> k;
     std::vector<double> v;
-    std::vector<double> attn_weights;
-    std::vector<double> attn_concat;
+    std::vector<double> x_attn;
+    std::vector<std::vector<double>> attn_weights;
     std::vector<double> x_mid;
     std::vector<double> x_norm2;
     std::vector<double> fc1;
     std::vector<double> relu;
 };
 
-struct ForwardCache {
-    int seq_len = 0;
-    std::vector<int> input_tokens;
-    std::vector<int> target_tokens;
+struct StepCache {
+    int input_token = 0;
+    int target_token = 0;
     std::vector<double> embed_pre;
     std::vector<double> x0;
-    std::vector<LayerCache> layers;
+    std::vector<LayerStepCache> layers;
     std::vector<double> final_x;
     std::vector<double> logits;
+};
+
+struct ForwardCache {
+    int seq_len = 0;
+    std::vector<StepCache> steps;
     double loss = 0.0;
 };
 
@@ -42,79 +45,9 @@ void append_values(std::vector<double>* out, const std::vector<double>& values) 
     out->insert(out->end(), values.begin(), values.end());
 }
 
-std::vector<double> rmsnorm_rows(const std::vector<double>& input, int rows, int cols) {
-    std::vector<double> output(input.size(), 0.0);
-    for (int row = 0; row < rows; ++row) {
-        double mean_square = 0.0;
-        for (int col = 0; col < cols; ++col) {
-            const double value = input[row * cols + col];
-            mean_square += value * value;
-        }
-        mean_square /= static_cast<double>(cols);
-        const double scale = 1.0 / std::sqrt(mean_square + kRmsNormEps);
-        for (int col = 0; col < cols; ++col) {
-            output[row * cols + col] = input[row * cols + col] * scale;
-        }
-    }
-    return output;
-}
-
-std::vector<double> backward_rmsnorm_rows(const std::vector<double>& input, const std::vector<double>& doutput, int rows, int cols) {
-    std::vector<double> dinput(input.size(), 0.0);
-    for (int row = 0; row < rows; ++row) {
-        double mean_square = 0.0;
-        double dot = 0.0;
-        for (int col = 0; col < cols; ++col) {
-            const double value = input[row * cols + col];
-            mean_square += value * value;
-            dot += doutput[row * cols + col] * value;
-        }
-        mean_square /= static_cast<double>(cols);
-        const double scale = 1.0 / std::sqrt(mean_square + kRmsNormEps);
-        const double coeff = dot * scale * scale * scale / static_cast<double>(cols);
-        for (int col = 0; col < cols; ++col) {
-            const double value = input[row * cols + col];
-            dinput[row * cols + col] = doutput[row * cols + col] * scale - value * coeff;
-        }
-    }
-    return dinput;
-}
-
-std::vector<double> linear_rows(const std::vector<double>& input, int rows, int in_dim, const std::vector<double>& weights, int out_dim) {
-    std::vector<double> output(rows * out_dim, 0.0);
-    for (int row = 0; row < rows; ++row) {
-        for (int out = 0; out < out_dim; ++out) {
-            double sum = 0.0;
-            for (int in = 0; in < in_dim; ++in) {
-                sum += weights[out * in_dim + in] * input[row * in_dim + in];
-            }
-            output[row * out_dim + out] = sum;
-        }
-    }
-    return output;
-}
-
-void backward_linear_rows(
-    const std::vector<double>& input,
-    int rows,
-    int in_dim,
-    const std::vector<double>& weights,
-    int out_dim,
-    const std::vector<double>& doutput,
-    std::vector<double>* dweights,
-    std::vector<double>* dinput
-) {
-    for (int row = 0; row < rows; ++row) {
-        for (int out = 0; out < out_dim; ++out) {
-            const double grad = doutput[row * out_dim + out];
-            if (grad == 0.0) {
-                continue;
-            }
-            for (int in = 0; in < in_dim; ++in) {
-                (*dweights)[out * in_dim + in] += grad * input[row * in_dim + in];
-                (*dinput)[row * in_dim + in] += weights[out * in_dim + in] * grad;
-            }
-        }
+void add_in_place(std::vector<double>* target, const std::vector<double>& values) {
+    for (std::size_t idx = 0; idx < target->size(); ++idx) {
+        (*target)[idx] += values[idx];
     }
 }
 
@@ -126,214 +59,255 @@ std::vector<double> add_vectors(const std::vector<double>& left, const std::vect
     return output;
 }
 
-ForwardCache forward_pass(const Model& model, const std::vector<int>& tokens) {
-    const ModelConfig& config = model.config;
-    const int seq_len = std::min(config.block_size, static_cast<int>(tokens.size()) - 1);
-    const int embd = config.n_embd;
-    const int vocab_size = config.vocab_size;
-    ForwardCache cache;
-    cache.seq_len = seq_len;
-    cache.input_tokens.assign(tokens.begin(), tokens.begin() + seq_len);
-    cache.target_tokens.assign(tokens.begin() + 1, tokens.begin() + 1 + seq_len);
-    cache.embed_pre.assign(seq_len * embd, 0.0);
+std::vector<double> linear(const std::vector<double>& input, const std::vector<double>& weights, int out_dim) {
+    const int in_dim = static_cast<int>(input.size());
+    std::vector<double> output(out_dim, 0.0);
+    for (int out = 0; out < out_dim; ++out) {
+        double sum = 0.0;
+        for (int in = 0; in < in_dim; ++in) {
+            sum += weights[out * in_dim + in] * input[in];
+        }
+        output[out] = sum;
+    }
+    return output;
+}
 
-    for (int pos = 0; pos < seq_len; ++pos) {
-        const int token_id = cache.input_tokens[pos];
-        for (int col = 0; col < embd; ++col) {
-            cache.embed_pre[pos * embd + col] = model.wte[token_id * embd + col] + model.wpe[pos * embd + col];
+void backward_linear(
+    const std::vector<double>& input,
+    const std::vector<double>& weights,
+    int out_dim,
+    const std::vector<double>& doutput,
+    std::vector<double>* dweights,
+    std::vector<double>* dinput
+) {
+    const int in_dim = static_cast<int>(input.size());
+    for (int out = 0; out < out_dim; ++out) {
+        const double grad = doutput[out];
+        if (grad == 0.0) {
+            continue;
+        }
+        for (int in = 0; in < in_dim; ++in) {
+            (*dweights)[out * in_dim + in] += grad * input[in];
+            (*dinput)[in] += weights[out * in_dim + in] * grad;
         }
     }
+}
 
-    std::vector<double> x = rmsnorm_rows(cache.embed_pre, seq_len, embd);
-    cache.x0 = x;
-    cache.layers.resize(config.n_layer);
+std::vector<double> softmax(const std::vector<double>& logits) {
+    const double max_logit = *std::max_element(logits.begin(), logits.end());
+    std::vector<double> probs(logits.size(), 0.0);
+    double exp_sum = 0.0;
+    for (std::size_t idx = 0; idx < logits.size(); ++idx) {
+        probs[idx] = std::exp(logits[idx] - max_logit);
+        exp_sum += probs[idx];
+    }
+    for (double& prob : probs) {
+        prob /= exp_sum;
+    }
+    return probs;
+}
 
-    for (int layer_idx = 0; layer_idx < config.n_layer; ++layer_idx) {
-        const LayerWeights& layer = model.layers[layer_idx];
-        LayerCache& layer_cache = cache.layers[layer_idx];
-        layer_cache.x_in = x;
-        layer_cache.x_norm1 = rmsnorm_rows(layer_cache.x_in, seq_len, embd);
-        layer_cache.q = linear_rows(layer_cache.x_norm1, seq_len, embd, layer.attn_wq, embd);
-        layer_cache.k = linear_rows(layer_cache.x_norm1, seq_len, embd, layer.attn_wk, embd);
-        layer_cache.v = linear_rows(layer_cache.x_norm1, seq_len, embd, layer.attn_wv, embd);
-        layer_cache.attn_weights.assign(config.n_head * seq_len * seq_len, 0.0);
-        layer_cache.attn_concat.assign(seq_len * embd, 0.0);
+std::vector<double> rmsnorm(const std::vector<double>& input) {
+    double mean_square = 0.0;
+    for (double value : input) {
+        mean_square += value * value;
+    }
+    mean_square /= static_cast<double>(input.size());
+    const double scale = 1.0 / std::sqrt(mean_square + kRmsNormEps);
 
-        for (int head = 0; head < config.n_head; ++head) {
-            const int head_start = head * config.head_dim();
-            for (int pos = 0; pos < seq_len; ++pos) {
+    std::vector<double> output(input.size(), 0.0);
+    for (std::size_t idx = 0; idx < input.size(); ++idx) {
+        output[idx] = input[idx] * scale;
+    }
+    return output;
+}
+
+std::vector<double> backward_rmsnorm(const std::vector<double>& input, const std::vector<double>& doutput) {
+    double mean_square = 0.0;
+    double dot = 0.0;
+    for (std::size_t idx = 0; idx < input.size(); ++idx) {
+        mean_square += input[idx] * input[idx];
+        dot += doutput[idx] * input[idx];
+    }
+    mean_square /= static_cast<double>(input.size());
+    const double scale = 1.0 / std::sqrt(mean_square + kRmsNormEps);
+    const double coeff = dot * scale * scale * scale / static_cast<double>(input.size());
+
+    std::vector<double> dinput(input.size(), 0.0);
+    for (std::size_t idx = 0; idx < input.size(); ++idx) {
+        dinput[idx] = doutput[idx] * scale - input[idx] * coeff;
+    }
+    return dinput;
+}
+
+ForwardCache forward_pass(const Model& model, const std::vector<int>& tokens) {
+    const ModelConfig& config = model.config;
+    ForwardCache cache;
+    cache.seq_len = std::min(config.block_size, static_cast<int>(tokens.size()) - 1);
+    cache.steps.resize(cache.seq_len);
+
+    for (int pos = 0; pos < cache.seq_len; ++pos) {
+        StepCache& step = cache.steps[pos];
+        step.input_token = tokens[pos];
+        step.target_token = tokens[pos + 1];
+        step.embed_pre.assign(config.n_embd, 0.0);
+
+        for (int col = 0; col < config.n_embd; ++col) {
+            step.embed_pre[col] =
+                model.wte[step.input_token * config.n_embd + col] +
+                model.wpe[pos * config.n_embd + col];
+        }
+
+        std::vector<double> x = rmsnorm(step.embed_pre);
+        step.x0 = x;
+        step.layers.resize(config.n_layer);
+
+        for (int layer_idx = 0; layer_idx < config.n_layer; ++layer_idx) {
+            const LayerWeights& layer = model.layers[layer_idx];
+            LayerStepCache& layer_step = step.layers[layer_idx];
+            layer_step.x_in = x;
+            layer_step.x_norm1 = rmsnorm(layer_step.x_in);
+            layer_step.q = linear(layer_step.x_norm1, layer.attn_wq, config.n_embd);
+            layer_step.k = linear(layer_step.x_norm1, layer.attn_wk, config.n_embd);
+            layer_step.v = linear(layer_step.x_norm1, layer.attn_wv, config.n_embd);
+            layer_step.x_attn.assign(config.n_embd, 0.0);
+            layer_step.attn_weights.resize(config.n_head);
+
+            for (int head = 0; head < config.n_head; ++head) {
+                const int head_start = head * config.head_dim();
                 std::vector<double> attn_logits(pos + 1, 0.0);
-                double max_logit = -std::numeric_limits<double>::infinity();
                 for (int t = 0; t <= pos; ++t) {
+                    const std::vector<double>& past_k = cache.steps[t].layers[layer_idx].k;
                     double dot = 0.0;
                     for (int j = 0; j < config.head_dim(); ++j) {
-                        dot += layer_cache.q[pos * embd + head_start + j] * layer_cache.k[t * embd + head_start + j];
+                        dot += layer_step.q[head_start + j] * past_k[head_start + j];
                     }
                     attn_logits[t] = dot / std::sqrt(static_cast<double>(config.head_dim()));
-                    max_logit = std::max(max_logit, attn_logits[t]);
                 }
-                std::vector<double> exps(pos + 1, 0.0);
-                double exp_sum = 0.0;
+
+                layer_step.attn_weights[head] = softmax(attn_logits);
                 for (int t = 0; t <= pos; ++t) {
-                    exps[t] = std::exp(attn_logits[t] - max_logit);
-                    exp_sum += exps[t];
-                }
-                for (int t = 0; t <= pos; ++t) {
-                    const double weight = exps[t] / exp_sum;
-                    layer_cache.attn_weights[head * seq_len * seq_len + pos * seq_len + t] = weight;
+                    const std::vector<double>& past_v = cache.steps[t].layers[layer_idx].v;
+                    const double weight = layer_step.attn_weights[head][t];
                     for (int j = 0; j < config.head_dim(); ++j) {
-                        layer_cache.attn_concat[pos * embd + head_start + j] += weight * layer_cache.v[t * embd + head_start + j];
+                        layer_step.x_attn[head_start + j] += weight * past_v[head_start + j];
                     }
                 }
             }
+
+            const std::vector<double> attn_proj = linear(layer_step.x_attn, layer.attn_wo, config.n_embd);
+            layer_step.x_mid = add_vectors(layer_step.x_in, attn_proj);
+            layer_step.x_norm2 = rmsnorm(layer_step.x_mid);
+            layer_step.fc1 = linear(layer_step.x_norm2, layer.mlp_fc1, config.mlp_dim());
+            layer_step.relu = layer_step.fc1;
+            for (double& value : layer_step.relu) {
+                value = std::max(0.0, value);
+            }
+            const std::vector<double> fc2 = linear(layer_step.relu, layer.mlp_fc2, config.n_embd);
+            x = add_vectors(layer_step.x_mid, fc2);
         }
 
-        const std::vector<double> attn_proj = linear_rows(layer_cache.attn_concat, seq_len, embd, layer.attn_wo, embd);
-        layer_cache.x_mid = add_vectors(layer_cache.x_in, attn_proj);
-        layer_cache.x_norm2 = rmsnorm_rows(layer_cache.x_mid, seq_len, embd);
-        layer_cache.fc1 = linear_rows(layer_cache.x_norm2, seq_len, embd, layer.mlp_fc1, config.mlp_dim());
-        layer_cache.relu = layer_cache.fc1;
-        for (double& value : layer_cache.relu) {
-            value = std::max(0.0, value);
-        }
-        const std::vector<double> fc2 = linear_rows(layer_cache.relu, seq_len, config.mlp_dim(), layer.mlp_fc2, embd);
-        x = add_vectors(layer_cache.x_mid, fc2);
+        step.final_x = x;
+        step.logits = linear(step.final_x, model.lm_head, config.vocab_size);
+        const std::vector<double> probs = softmax(step.logits);
+        cache.loss += -std::log(probs[step.target_token]);
     }
 
-    cache.final_x = x;
-    cache.logits = linear_rows(cache.final_x, seq_len, embd, model.lm_head, vocab_size);
-    cache.loss = 0.0;
-    for (int pos = 0; pos < seq_len; ++pos) {
-        double max_logit = -std::numeric_limits<double>::infinity();
-        for (int vocab = 0; vocab < vocab_size; ++vocab) {
-            max_logit = std::max(max_logit, cache.logits[pos * vocab_size + vocab]);
-        }
-        double exp_sum = 0.0;
-        for (int vocab = 0; vocab < vocab_size; ++vocab) {
-            exp_sum += std::exp(cache.logits[pos * vocab_size + vocab] - max_logit);
-        }
-        const int target = cache.target_tokens[pos];
-        const double target_prob = std::exp(cache.logits[pos * vocab_size + target] - max_logit) / exp_sum;
-        cache.loss += -std::log(target_prob);
-    }
-    cache.loss /= static_cast<double>(seq_len);
+    cache.loss /= static_cast<double>(cache.seq_len);
     return cache;
 }
 
 Model backward_pass(const Model& model, const ForwardCache& cache) {
     const ModelConfig& config = model.config;
-    const int seq_len = cache.seq_len;
-    const int embd = config.n_embd;
-    const int vocab_size = config.vocab_size;
     Model grads = make_empty_model(config);
 
-    std::vector<double> dlogits(seq_len * vocab_size, 0.0);
-    for (int pos = 0; pos < seq_len; ++pos) {
-        double max_logit = -std::numeric_limits<double>::infinity();
-        for (int vocab = 0; vocab < vocab_size; ++vocab) {
-            max_logit = std::max(max_logit, cache.logits[pos * vocab_size + vocab]);
+    std::vector<std::vector<double>> dx(cache.seq_len, std::vector<double>(config.n_embd, 0.0));
+    for (int pos = 0; pos < cache.seq_len; ++pos) {
+        std::vector<double> dlogits = softmax(cache.steps[pos].logits);
+        dlogits[cache.steps[pos].target_token] -= 1.0;
+        for (double& grad : dlogits) {
+            grad /= static_cast<double>(cache.seq_len);
         }
-        std::vector<double> probs(vocab_size, 0.0);
-        double exp_sum = 0.0;
-        for (int vocab = 0; vocab < vocab_size; ++vocab) {
-            probs[vocab] = std::exp(cache.logits[pos * vocab_size + vocab] - max_logit);
-            exp_sum += probs[vocab];
-        }
-        for (int vocab = 0; vocab < vocab_size; ++vocab) {
-            probs[vocab] /= exp_sum;
-            dlogits[pos * vocab_size + vocab] = probs[vocab] / static_cast<double>(seq_len);
-        }
-        dlogits[pos * vocab_size + cache.target_tokens[pos]] -= 1.0 / static_cast<double>(seq_len);
+        backward_linear(cache.steps[pos].final_x, model.lm_head, config.vocab_size, dlogits, &grads.lm_head, &dx[pos]);
     }
-
-    std::vector<double> dx(cache.final_x.size(), 0.0);
-    backward_linear_rows(cache.final_x, seq_len, embd, model.lm_head, vocab_size, dlogits, &grads.lm_head, &dx);
 
     for (int layer_idx = config.n_layer - 1; layer_idx >= 0; --layer_idx) {
-        const LayerWeights& layer = model.layers[layer_idx];
-        const LayerCache& layer_cache = cache.layers[layer_idx];
+        std::vector<std::vector<double>> dx_prev(cache.seq_len, std::vector<double>(config.n_embd, 0.0));
+        std::vector<std::vector<double>> d_q(cache.seq_len, std::vector<double>(config.n_embd, 0.0));
+        std::vector<std::vector<double>> d_k(cache.seq_len, std::vector<double>(config.n_embd, 0.0));
+        std::vector<std::vector<double>> d_v(cache.seq_len, std::vector<double>(config.n_embd, 0.0));
         LayerWeights& layer_grads = grads.layers[layer_idx];
+        const LayerWeights& layer = model.layers[layer_idx];
 
-        std::vector<double> d_fc2 = dx;
-        std::vector<double> d_x_mid = dx;
+        for (int pos = cache.seq_len - 1; pos >= 0; --pos) {
+            const LayerStepCache& layer_step = cache.steps[pos].layers[layer_idx];
+            std::vector<double> d_x_mid = dx[pos];
 
-        std::vector<double> d_relu(seq_len * config.mlp_dim(), 0.0);
-        std::vector<double> d_x_norm2(seq_len * embd, 0.0);
-        backward_linear_rows(layer_cache.relu, seq_len, config.mlp_dim(), layer.mlp_fc2, embd, d_fc2, &layer_grads.mlp_fc2, &d_relu);
+            std::vector<double> d_relu(config.mlp_dim(), 0.0);
+            backward_linear(layer_step.relu, layer.mlp_fc2, config.n_embd, dx[pos], &layer_grads.mlp_fc2, &d_relu);
 
-        std::vector<double> d_fc1(seq_len * config.mlp_dim(), 0.0);
-        for (std::size_t idx = 0; idx < d_fc1.size(); ++idx) {
-            d_fc1[idx] = layer_cache.fc1[idx] > 0.0 ? d_relu[idx] : 0.0;
-        }
-        backward_linear_rows(layer_cache.x_norm2, seq_len, embd, layer.mlp_fc1, config.mlp_dim(), d_fc1, &layer_grads.mlp_fc1, &d_x_norm2);
+            std::vector<double> d_fc1(config.mlp_dim(), 0.0);
+            for (int idx = 0; idx < config.mlp_dim(); ++idx) {
+                d_fc1[idx] = layer_step.fc1[idx] > 0.0 ? d_relu[idx] : 0.0;
+            }
 
-        const std::vector<double> d_from_norm2 = backward_rmsnorm_rows(layer_cache.x_mid, d_x_norm2, seq_len, embd);
-        for (std::size_t idx = 0; idx < d_x_mid.size(); ++idx) {
-            d_x_mid[idx] += d_from_norm2[idx];
-        }
+            std::vector<double> d_x_norm2(config.n_embd, 0.0);
+            backward_linear(layer_step.x_norm2, layer.mlp_fc1, config.mlp_dim(), d_fc1, &layer_grads.mlp_fc1, &d_x_norm2);
+            add_in_place(&d_x_mid, backward_rmsnorm(layer_step.x_mid, d_x_norm2));
 
-        std::vector<double> d_attn_proj = d_x_mid;
-        std::vector<double> d_x_in = d_x_mid;
-        std::vector<double> d_attn_concat(seq_len * embd, 0.0);
-        backward_linear_rows(layer_cache.attn_concat, seq_len, embd, layer.attn_wo, embd, d_attn_proj, &layer_grads.attn_wo, &d_attn_concat);
+            std::vector<double> d_x_in = d_x_mid;
+            std::vector<double> d_x_attn(config.n_embd, 0.0);
+            backward_linear(layer_step.x_attn, layer.attn_wo, config.n_embd, d_x_mid, &layer_grads.attn_wo, &d_x_attn);
 
-        std::vector<double> d_q(seq_len * embd, 0.0);
-        std::vector<double> d_k(seq_len * embd, 0.0);
-        std::vector<double> d_v(seq_len * embd, 0.0);
+            for (int head = 0; head < config.n_head; ++head) {
+                const int head_start = head * config.head_dim();
+                const double scale = 1.0 / std::sqrt(static_cast<double>(config.head_dim()));
+                std::vector<double> d_attn_weights(pos + 1, 0.0);
 
-        for (int head = 0; head < config.n_head; ++head) {
-            const int head_start = head * config.head_dim();
-            const double scale = 1.0 / std::sqrt(static_cast<double>(config.head_dim()));
-            std::vector<double> d_attn_weights(seq_len * seq_len, 0.0);
-
-            for (int pos = 0; pos < seq_len; ++pos) {
                 for (int t = 0; t <= pos; ++t) {
+                    const std::vector<double>& past_v = cache.steps[t].layers[layer_idx].v;
                     double dot = 0.0;
                     for (int j = 0; j < config.head_dim(); ++j) {
-                        dot += d_attn_concat[pos * embd + head_start + j] * layer_cache.v[t * embd + head_start + j];
-                        d_v[t * embd + head_start + j] += layer_cache.attn_weights[head * seq_len * seq_len + pos * seq_len + t] *
-                                                          d_attn_concat[pos * embd + head_start + j];
+                        dot += d_x_attn[head_start + j] * past_v[head_start + j];
+                        d_v[t][head_start + j] += layer_step.attn_weights[head][t] * d_x_attn[head_start + j];
                     }
-                    d_attn_weights[pos * seq_len + t] += dot;
+                    d_attn_weights[t] = dot;
                 }
-            }
 
-            for (int pos = 0; pos < seq_len; ++pos) {
                 double softmax_dot = 0.0;
                 for (int t = 0; t <= pos; ++t) {
-                    const double weight = layer_cache.attn_weights[head * seq_len * seq_len + pos * seq_len + t];
-                    softmax_dot += d_attn_weights[pos * seq_len + t] * weight;
+                    softmax_dot += d_attn_weights[t] * layer_step.attn_weights[head][t];
                 }
+
                 for (int t = 0; t <= pos; ++t) {
-                    const double weight = layer_cache.attn_weights[head * seq_len * seq_len + pos * seq_len + t];
-                    const double dlogit = weight * (d_attn_weights[pos * seq_len + t] - softmax_dot);
+                    const std::vector<double>& past_k = cache.steps[t].layers[layer_idx].k;
+                    const double dlogit = layer_step.attn_weights[head][t] * (d_attn_weights[t] - softmax_dot);
                     for (int j = 0; j < config.head_dim(); ++j) {
-                        d_q[pos * embd + head_start + j] += dlogit * layer_cache.k[t * embd + head_start + j] * scale;
-                        d_k[t * embd + head_start + j] += dlogit * layer_cache.q[pos * embd + head_start + j] * scale;
+                        d_q[pos][head_start + j] += dlogit * past_k[head_start + j] * scale;
+                        d_k[t][head_start + j] += dlogit * layer_step.q[head_start + j] * scale;
                     }
                 }
             }
+
+            std::vector<double> d_x_norm1(config.n_embd, 0.0);
+            backward_linear(layer_step.x_norm1, layer.attn_wq, config.n_embd, d_q[pos], &layer_grads.attn_wq, &d_x_norm1);
+            backward_linear(layer_step.x_norm1, layer.attn_wk, config.n_embd, d_k[pos], &layer_grads.attn_wk, &d_x_norm1);
+            backward_linear(layer_step.x_norm1, layer.attn_wv, config.n_embd, d_v[pos], &layer_grads.attn_wv, &d_x_norm1);
+            add_in_place(&d_x_in, backward_rmsnorm(layer_step.x_in, d_x_norm1));
+
+            dx_prev[pos] = std::move(d_x_in);
         }
 
-        std::vector<double> d_x_norm1(seq_len * embd, 0.0);
-        backward_linear_rows(layer_cache.x_norm1, seq_len, embd, layer.attn_wq, embd, d_q, &layer_grads.attn_wq, &d_x_norm1);
-        backward_linear_rows(layer_cache.x_norm1, seq_len, embd, layer.attn_wk, embd, d_k, &layer_grads.attn_wk, &d_x_norm1);
-        backward_linear_rows(layer_cache.x_norm1, seq_len, embd, layer.attn_wv, embd, d_v, &layer_grads.attn_wv, &d_x_norm1);
-
-        const std::vector<double> d_from_norm1 = backward_rmsnorm_rows(layer_cache.x_in, d_x_norm1, seq_len, embd);
-        for (std::size_t idx = 0; idx < d_x_in.size(); ++idx) {
-            d_x_in[idx] += d_from_norm1[idx];
-        }
-        dx = d_x_in;
+        dx = std::move(dx_prev);
     }
 
-    const std::vector<double> d_embed_pre = backward_rmsnorm_rows(cache.embed_pre, dx, seq_len, embd);
-    for (int pos = 0; pos < seq_len; ++pos) {
-        const int token_id = cache.input_tokens[pos];
-        for (int col = 0; col < embd; ++col) {
-            const double grad = d_embed_pre[pos * embd + col];
-            grads.wte[token_id * embd + col] += grad;
-            grads.wpe[pos * embd + col] += grad;
+    for (int pos = 0; pos < cache.seq_len; ++pos) {
+        const std::vector<double> d_embed_pre = backward_rmsnorm(cache.steps[pos].embed_pre, dx[pos]);
+        const int token_id = cache.steps[pos].input_token;
+        for (int col = 0; col < config.n_embd; ++col) {
+            const double grad = d_embed_pre[col];
+            grads.wte[token_id * config.n_embd + col] += grad;
+            grads.wpe[pos * config.n_embd + col] += grad;
         }
     }
 
@@ -437,11 +411,15 @@ KernelResult run_forward_backward(const Model& model, const std::vector<int>& to
     if (tokens.size() < 2) {
         throw std::runtime_error("token sequence must contain at least one input and one target token");
     }
+
     const ForwardCache cache = forward_pass(model, tokens);
     KernelResult result;
     result.seq_len = cache.seq_len;
-    result.logits = cache.logits;
     result.loss = cache.loss;
     result.grads = backward_pass(model, cache);
+
+    for (const StepCache& step : cache.steps) {
+        append_values(&result.logits, step.logits);
+    }
     return result;
 }

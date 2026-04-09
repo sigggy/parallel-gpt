@@ -177,20 +177,28 @@ def validate_fixture(fixture_dir: Path, seed: int):
     print("validation=pass")
 
 
-def run_benchmark(dataset_path: Path, sample_name: str, seed: int, preset_name: str, num_steps: int | None):
-    uchars, tokens = load_tokens(dataset_path, sample_name)
+def run_benchmark(dataset_path: Path, seed: int, preset_name: str, num_steps: int | None):
+    docs = load_docs(dataset_path)
+    if not docs:
+        raise ValueError(f"dataset is empty: {dataset_path}")
+    uchars, vocab, bos = build_vocab(docs)
     preset = BENCHMARK_PRESETS[preset_name]
     config = preset["config"]
-    steps = num_steps if num_steps is not None else preset["steps"]
+    requested_steps = num_steps if num_steps is not None else preset["steps"]
+    steps = min(requested_steps, len(docs))
     state_dict, params = init_model(config, len(uchars) + 1, seed)
     last_result = None
-    for _ in range(steps):
+    last_doc = ""
+    for step_idx in range(steps):
+        last_doc = docs[step_idx]
+        tokens = encode_doc(last_doc, vocab, bos)
         last_result = run_forward_backward(tokens, state_dict, params, config)
     print(
         "mode=benchmark "
         f"preset={preset_name} "
+        f"requested_steps={requested_steps} "
         f"steps={steps} "
-        f"sample_name={sample_name} "
+        f"last_doc={last_doc} "
         f"loss={last_result['loss']:.6f}"
     )
 
@@ -203,7 +211,7 @@ def main():
     if args.mode == "validate":
         validate_fixture(args.fixture_dir, args.seed)
         return
-    run_benchmark(args.dataset, args.sample_name, args.seed, args.preset, args.num_steps)
+    run_benchmark(args.dataset, args.seed, args.preset, args.num_steps)
 
 
 if __name__ == "__main__":

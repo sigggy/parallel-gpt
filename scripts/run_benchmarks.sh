@@ -7,7 +7,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
 DATASET="$ROOT_DIR/training_data/datasets/names.txt"
 FIXTURE_DIR="$ROOT_DIR/training_data/fixtures/small_case"
-SAMPLE_NAME="anna"
 PYTHON_BIN="${PYTHON:-python3}"
 
 serial_python_valid=0
@@ -80,7 +79,6 @@ benchmark_once() {
                 --mode benchmark \
                 --dataset "$DATASET" \
                 --preset "$preset" \
-                --sample-name "$SAMPLE_NAME" \
                 > /dev/null 2> "$time_file"; then
                 rm -f "$time_file"
                 return 1
@@ -91,7 +89,6 @@ benchmark_once() {
                 --mode benchmark \
                 --dataset "$DATASET" \
                 --preset "$preset" \
-                --sample-name "$SAMPLE_NAME" \
                 > /dev/null 2> "$time_file"; then
                 rm -f "$time_file"
                 return 1

@@ -54,7 +54,6 @@ Python reference:
 python3 methods/serial_python/serial.py \
   --mode benchmark \
   --dataset training_data/datasets/names.txt \
-  --sample-name anna \
   --preset small
 ```
 
@@ -64,7 +63,6 @@ Serial C++:
 build/serial_cpp \
   --mode benchmark \
   --dataset training_data/datasets/names.txt \
-  --sample-name anna \
   --preset small
 ```
 
@@ -74,7 +72,6 @@ Parallel C++:
 build/parallel_cpp \
   --mode benchmark \
   --dataset training_data/datasets/names.txt \
-  --sample-name anna \
   --preset small
 ```
 
@@ -84,13 +81,12 @@ Optional presets:
 - `medium`
 - `large`
 
-Override the repeat count if needed:
+Override how many names are processed if needed:
 
 ```bash
 build/serial_cpp \
   --mode benchmark \
   --dataset training_data/datasets/names.txt \
-  --sample-name anna \
   --preset small \
   --num-steps 10
 ```
@@ -132,7 +128,7 @@ The Python version is the reference implementation. It is used to generate deter
 
 Those files live in `training_data/fixtures/small_case/`. Validation works by loading the fixture weights, running the method’s forward/backward pass on the fixed token sequence from the manifest, and comparing the outputs against the Python ground truth within an epsilon.
 
-Benchmarking is intentionally simple. Each executable loads the dataset, builds the vocabulary, tokenizes the chosen sample name, initializes weights from the fixed seed, and then repeatedly runs the forward/backward kernel. The outer script uses `/usr/bin/time -p` and reports median wall-clock time across five runs. This means timing includes process startup and dataset loading for every method equally.
+Benchmarking follows the original microGPT training shape more closely than before. Each executable loads the dataset, builds the vocabulary, initializes weights from the fixed seed, and then processes the first `k` names in dataset order, where `k` is the preset size or `--num-steps`. For each benchmark step it builds `[BOS] + doc + [BOS]`, runs the forward pass across that sequence, computes the next-token loss, and runs backward. The only thing intentionally omitted from the original training loop is the optimizer update. The outer script uses `/usr/bin/time -p` and reports median wall-clock time across five runs. This means timing includes process startup and dataset loading for every method equally.
 
 The current methods are:
 
