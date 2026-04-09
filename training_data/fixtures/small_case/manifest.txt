@@ -1,0 +1,14 @@
+format_version=1
+dataset_path=training_data/datasets/names.txt
+sample_name=anna
+token_ids=26,0,13,13,0,26
+vocab_size=27
+n_layer=1
+n_embd=16
+block_size=16
+n_head=4
+validation_epsilon=0.0001
+weights_init_file=weights_init.bin
+expected_logits_file=expected_logits.bin
+expected_loss_file=expected_loss.bin
+expected_grads_file=expected_grads.bin
