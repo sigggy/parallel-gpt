@@ -49,10 +49,6 @@ get_baseline() {
     esac
 }
 
-median_of_five() {
-    printf "%s\n" "$@" | sort -n | awk 'NR == 3 { print $1 }'
-}
-
 run_validate_method() {
     local method="$1"
     case "$method" in
@@ -104,23 +100,11 @@ benchmark_once() {
     return 0
 }
 
-benchmark_median() {
-    local method="$1"
-    local preset="$2"
-    local runs=()
-    local run_time=""
-    local idx=0
-    while [ "$idx" -lt 5 ]; do
-        if ! run_time="$(benchmark_once "$method" "$preset")"; then
-            return 1
-        fi
-        runs+=("$run_time")
-        idx=$((idx + 1))
-    done
-    median_of_five "${runs[@]}"
-}
-
 printf "Building binaries and regenerating fixtures...\n"
+if ! command -v nvcc >/dev/null 2>&1; then
+    printf "parallel_cpp now requires nvcc on PATH. Install the CUDA toolkit before running the full benchmark sweep.\n" >&2
+    exit 1
+fi
 if ! make -C "$ROOT_DIR" fixtures all; then
     printf "Build failed.\n" >&2
     exit 1
@@ -143,18 +127,18 @@ for preset in small medium large; do
             printf "%s: INVALID\n" "$method"
             continue
         fi
-        median_time="$(benchmark_median "$method" "$preset")" || {
+        raw_time="$(benchmark_once "$method" "$preset")" || {
             printf "%s: benchmark failed\n" "$method"
             continue
         }
-        printf "%s median_real=%s\n" "$method" "$median_time"
+        printf "%s raw_real=%s\n" "$method" "$raw_time"
         if [ "$method" = "serial_cpp" ]; then
-            set_baseline "$preset" "$median_time"
+            set_baseline "$preset" "$raw_time"
             printf "%s speedup=1.000000\n" "$method"
         else
             baseline_value="$(get_baseline "$preset")"
             if [ -n "$baseline_value" ]; then
-                speedup="$(awk -v base="$baseline_value" -v current="$median_time" 'BEGIN { printf "%.6f", base / current }')"
+                speedup="$(awk -v base="$baseline_value" -v current="$raw_time" 'BEGIN { printf "%.6f", base / current }')"
                 printf "%s speedup=%s\n" "$method" "$speedup"
             else
                 printf "%s speedup=N/A\n" "$method"

@@ -87,6 +87,9 @@ std::vector<std::string> load_docs(const std::filesystem::path& dataset_path) {
 }
 
 std::pair<std::string, std::unordered_map<char, int>> build_vocab(const std::vector<std::string>& docs) {
+    // Input: raw dataset strings.
+    // Transformation: collect every character, sort, deduplicate, then assign each char an integer ID.
+    // Output: the ordered character list plus a char -> token_id lookup table.
     std::string chars;
     for (const std::string& doc : docs) {
         chars += doc;
@@ -101,6 +104,9 @@ std::pair<std::string, std::unordered_map<char, int>> build_vocab(const std::vec
 }
 
 std::vector<int> encode_doc(const std::string& doc, const std::unordered_map<char, int>& vocab, int bos_token_id) {
+    // Input: one document like "anna" and the shared vocabulary mapping.
+    // Transformation: add BOS at both ends and replace each character with its token ID.
+    // Output: a token sequence suitable for next-token prediction.
     std::vector<int> tokens;
     tokens.reserve(doc.size() + 2);
     tokens.push_back(bos_token_id);
@@ -148,6 +154,9 @@ std::vector<int> parse_int_list(const std::string& text) {
 }
 
 std::vector<float> read_f32_file(const std::filesystem::path& path) {
+    // Input: a binary fixture file written as packed float32 values.
+    // Transformation: read raw bytes, verify the size matches float32 alignment, reinterpret as floats.
+    // Output: the numeric fixture values used for validation.
     std::ifstream input(path, std::ios::binary);
     if (!input) {
         throw std::runtime_error("failed to open binary file: " + path.string());
@@ -192,6 +201,9 @@ int run_validate(const CliOptions& options) {
         throw std::runtime_error("--fixture-dir is required for validate mode");
     }
 
+    // Input: manifest metadata plus the fixture files produced by the Python reference.
+    // Transformation: rebuild the same model state and token sequence, then run the C++ kernel.
+    // Output: max-error checks for logits, loss, and gradients against the reference outputs.
     const std::filesystem::path manifest_path = options.fixture_dir / "manifest.txt";
     const auto manifest = parse_manifest(manifest_path);
     ModelConfig config;
@@ -240,6 +252,9 @@ int run_benchmark(const CliOptions& options) {
     const int steps = std::min(requested_steps, static_cast<int>(docs.size()));
     const Model model = initialize_model(preset.config, options.seed);
 
+    // Input: the dataset names in file order.
+    // Transformation: tokenize each name and run one forward/backward pass per example.
+    // Output: the loss from the last processed document, which is printed for benchmarking.
     double last_loss = 0.0;
     std::string last_doc;
     for (int step = 0; step < steps; ++step) {

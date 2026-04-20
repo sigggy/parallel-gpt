@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <random>
 #include <stdexcept>
 
 namespace {
@@ -39,19 +38,18 @@ struct ForwardCache {
 };
 
 constexpr double kRmsNormEps = 1e-5;
-constexpr double kInitStd = 0.08;
-
-void append_values(std::vector<double>* out, const std::vector<double>& values) {
-    out->insert(out->end(), values.begin(), values.end());
-}
 
 void add_in_place(std::vector<double>* target, const std::vector<double>& values) {
+    // Elementwise accumulation used for residual paths and gradient accumulation:
+    // target[i] = target[i] + values[i]
     for (std::size_t idx = 0; idx < target->size(); ++idx) {
         (*target)[idx] += values[idx];
     }
 }
 
 std::vector<double> add_vectors(const std::vector<double>& left, const std::vector<double>& right) {
+    // Pure elementwise vector add:
+    // output[i] = left[i] + right[i]
     std::vector<double> output(left.size(), 0.0);
     for (std::size_t idx = 0; idx < left.size(); ++idx) {
         output[idx] = left[idx] + right[idx];
@@ -60,6 +58,14 @@ std::vector<double> add_vectors(const std::vector<double>& left, const std::vect
 }
 
 std::vector<double> linear(const std::vector<double>& input, const std::vector<double>& weights, int out_dim) {
+    // Dense matrix-vector multiply.
+    // Shapes:
+    // - input: [in_dim]
+    // - weights: [out_dim, in_dim] stored row-major
+    // - output: [out_dim]
+    //
+    // Math:
+    // output[out] = sum_in weights[out, in] * input[in]
     const int in_dim = static_cast<int>(input.size());
     std::vector<double> output(out_dim, 0.0);
     for (int out = 0; out < out_dim; ++out) {
@@ -80,6 +86,11 @@ void backward_linear(
     std::vector<double>* dweights,
     std::vector<double>* dinput
 ) {
+    // Backward pass for the dense layer above.
+    //
+    // If y = W x, then:
+    // - dW[out, in] += dY[out] * x[in]
+    // - dX[in] += W[out, in] * dY[out]
     const int in_dim = static_cast<int>(input.size());
     for (int out = 0; out < out_dim; ++out) {
         const double grad = doutput[out];
@@ -94,6 +105,12 @@ void backward_linear(
 }
 
 std::vector<double> softmax(const std::vector<double>& logits) {
+    // Convert arbitrary logits into a probability distribution.
+    //
+    // Math:
+    // probs[i] = exp(logits[i]) / sum_j exp(logits[j])
+    //
+    // We subtract max_logit first for numerical stability so exp() does not overflow.
     const double max_logit = *std::max_element(logits.begin(), logits.end());
     std::vector<double> probs(logits.size(), 0.0);
     double exp_sum = 0.0;
@@ -108,6 +125,14 @@ std::vector<double> softmax(const std::vector<double>& logits) {
 }
 
 std::vector<double> rmsnorm(const std::vector<double>& input) {
+    // RMSNorm rescales the vector by its root-mean-square magnitude.
+    //
+    // Math:
+    // mean_square = (1 / N) * sum_i input[i]^2
+    // scale = 1 / sqrt(mean_square + eps)
+    // output[i] = input[i] * scale
+    //
+    // This keeps the direction of the vector but normalizes its overall scale.
     double mean_square = 0.0;
     for (double value : input) {
         mean_square += value * value;
@@ -123,6 +148,12 @@ std::vector<double> rmsnorm(const std::vector<double>& input) {
 }
 
 std::vector<double> backward_rmsnorm(const std::vector<double>& input, const std::vector<double>& doutput) {
+    // Backward pass for RMSNorm.
+    //
+    // Intuition:
+    // - one term scales the upstream gradient directly
+    // - one correction term accounts for the fact that the normalization scale
+    //   itself depends on every element of the input vector
     double mean_square = 0.0;
     double dot = 0.0;
     for (std::size_t idx = 0; idx < input.size(); ++idx) {
@@ -141,25 +172,34 @@ std::vector<double> backward_rmsnorm(const std::vector<double>& input, const std
 }
 
 ForwardCache forward_pass(const Model& model, const std::vector<int>& tokens) {
+    // Input: model weights plus one tokenized sequence such as [BOS, a, n, n, a, BOS].
+    // Transformation: run embeddings, transformer blocks, and next-token scoring while caching activations.
+    // Output: per-position hidden states/logits and the average next-token loss.
     const ModelConfig& config = model.config;
     ForwardCache cache;
     cache.seq_len = std::min(config.block_size, static_cast<int>(tokens.size()) - 1);
     cache.steps.resize(cache.seq_len);
 
+    //* Per token 
     for (int pos = 0; pos < cache.seq_len; ++pos) {
         StepCache& step = cache.steps[pos];
         step.input_token = tokens[pos];
         step.target_token = tokens[pos + 1];
         step.embed_pre.assign(config.n_embd, 0.0);
 
+        // Input: one token ID and one position ID.
+        // Transformation: look up the token embedding and position embedding, add them elementwise.
+        // Output: the pre-normalized representation for this sequence position.
+        //* CUDA speedup opporunity //* Per embedding dim
         for (int col = 0; col < config.n_embd; ++col) {
-            step.embed_pre[col] =
-                model.wte[step.input_token * config.n_embd + col] +
-                model.wpe[pos * config.n_embd + col];
+            double token_val = model.wte[step.input_token * config.n_embd + col];
+            double pos_val   = model.wpe[pos * config.n_embd + col];
+
+            step.embed_pre[col] = token_val + pos_val;
         }
 
-        std::vector<double> x = rmsnorm(step.embed_pre);
-        step.x0 = x;
+        std::vector<double> x = rmsnorm(step.embed_pre); //* CUDA opporunity 
+        step.x0 = x; // our first normalized hidden state 
         step.layers.resize(config.n_layer);
 
         for (int layer_idx = 0; layer_idx < config.n_layer; ++layer_idx) {
@@ -173,6 +213,9 @@ ForwardCache forward_pass(const Model& model, const std::vector<int>& tokens) {
             layer_step.x_attn.assign(config.n_embd, 0.0);
             layer_step.attn_weights.resize(config.n_head);
 
+            // Input: the current hidden state plus cached keys/values from earlier positions.
+            // Transformation: build Q/K/V, compute causal attention weights, and mix prior value vectors.
+            // Output: an attention-informed hidden vector for this layer.
             for (int head = 0; head < config.n_head; ++head) {
                 const int head_start = head * config.head_dim();
                 std::vector<double> attn_logits(pos + 1, 0.0);
@@ -203,11 +246,18 @@ ForwardCache forward_pass(const Model& model, const std::vector<int>& tokens) {
             for (double& value : layer_step.relu) {
                 value = std::max(0.0, value);
             }
+
+            // Input: the post-attention hidden state.
+            // Transformation: expand with FC1, apply ReLU, project back down with FC2, then add the residual.
+            // Output: the layer output that becomes the next layer's input.
             const std::vector<double> fc2 = linear(layer_step.relu, layer.mlp_fc2, config.n_embd);
             x = add_vectors(layer_step.x_mid, fc2);
         }
 
         step.final_x = x;
+        // Input: the final hidden state at this position.
+        // Transformation: project into vocabulary space and normalize with softmax for the target token.
+        // Output: logits for every possible next token and one scalar loss contribution.
         step.logits = linear(step.final_x, model.lm_head, config.vocab_size);
         const std::vector<double> probs = softmax(step.logits);
         cache.loss += -std::log(probs[step.target_token]);
@@ -218,11 +268,17 @@ ForwardCache forward_pass(const Model& model, const std::vector<int>& tokens) {
 }
 
 Model backward_pass(const Model& model, const ForwardCache& cache) {
+    // Input: the original model weights plus the cached forward activations.
+    // Transformation: move the loss gradient backward through logits, MLP, attention, and embeddings.
+    // Output: a gradient buffer with the same shape as the model weights.
     const ModelConfig& config = model.config;
     Model grads = make_empty_model(config);
 
     std::vector<std::vector<double>> dx(cache.seq_len, std::vector<double>(config.n_embd, 0.0));
     for (int pos = 0; pos < cache.seq_len; ++pos) {
+        // Input: logits and the correct next-token ID.
+        // Transformation: convert cross-entropy into gradients in vocabulary space.
+        // Output: dlogits and the first hidden-state gradient for this position.
         std::vector<double> dlogits = softmax(cache.steps[pos].logits);
         dlogits[cache.steps[pos].target_token] -= 1.0;
         for (double& grad : dlogits) {
@@ -243,6 +299,9 @@ Model backward_pass(const Model& model, const ForwardCache& cache) {
             const LayerStepCache& layer_step = cache.steps[pos].layers[layer_idx];
             std::vector<double> d_x_mid = dx[pos];
 
+            // Input: gradient from the layer output.
+            // Transformation: backprop through the MLP path and add the residual-path gradient.
+            // Output: gradients for FC1/FC2 plus the gradient entering the attention sublayer.
             std::vector<double> d_relu(config.mlp_dim(), 0.0);
             backward_linear(layer_step.relu, layer.mlp_fc2, config.n_embd, dx[pos], &layer_grads.mlp_fc2, &d_relu);
 
@@ -259,6 +318,9 @@ Model backward_pass(const Model& model, const ForwardCache& cache) {
             std::vector<double> d_x_attn(config.n_embd, 0.0);
             backward_linear(layer_step.x_attn, layer.attn_wo, config.n_embd, d_x_mid, &layer_grads.attn_wo, &d_x_attn);
 
+            // Input: gradient on the attention output.
+            // Transformation: distribute it back through attention weights and the stored Q/K/V paths.
+            // Output: gradients for the attention projections and earlier timesteps' cached states.
             for (int head = 0; head < config.n_head; ++head) {
                 const int head_start = head * config.head_dim();
                 const double scale = 1.0 / std::sqrt(static_cast<double>(config.head_dim()));
@@ -302,6 +364,9 @@ Model backward_pass(const Model& model, const ForwardCache& cache) {
     }
 
     for (int pos = 0; pos < cache.seq_len; ++pos) {
+        // Input: the gradient on the normalized embedding vector.
+        // Transformation: undo the initial RMSNorm and split the result between token and position tables.
+        // Output: updates for wte[token_id] and wpe[pos].
         const std::vector<double> d_embed_pre = backward_rmsnorm(cache.steps[pos].embed_pre, dx[pos]);
         const int token_id = cache.steps[pos].input_token;
         for (int col = 0; col < config.n_embd; ++col) {
@@ -314,98 +379,7 @@ Model backward_pass(const Model& model, const ForwardCache& cache) {
     return grads;
 }
 
-void assign_random(std::vector<double>* values, std::mt19937* rng) {
-    std::normal_distribution<double> normal(0.0, kInitStd);
-    for (double& value : *values) {
-        value = normal(*rng);
-    }
-}
-
 }  // namespace
-
-Model make_empty_model(const ModelConfig& config) {
-    Model model;
-    model.config = config;
-    model.wte.assign(config.vocab_size * config.n_embd, 0.0);
-    model.wpe.assign(config.block_size * config.n_embd, 0.0);
-    model.lm_head.assign(config.vocab_size * config.n_embd, 0.0);
-    model.layers.resize(config.n_layer);
-    for (LayerWeights& layer : model.layers) {
-        layer.attn_wq.assign(config.n_embd * config.n_embd, 0.0);
-        layer.attn_wk.assign(config.n_embd * config.n_embd, 0.0);
-        layer.attn_wv.assign(config.n_embd * config.n_embd, 0.0);
-        layer.attn_wo.assign(config.n_embd * config.n_embd, 0.0);
-        layer.mlp_fc1.assign(config.mlp_dim() * config.n_embd, 0.0);
-        layer.mlp_fc2.assign(config.n_embd * config.mlp_dim(), 0.0);
-    }
-    return model;
-}
-
-Model initialize_model(const ModelConfig& config, std::uint32_t seed) {
-    Model model = make_empty_model(config);
-    std::mt19937 rng(seed);
-    assign_random(&model.wte, &rng);
-    assign_random(&model.wpe, &rng);
-    assign_random(&model.lm_head, &rng);
-    for (LayerWeights& layer : model.layers) {
-        assign_random(&layer.attn_wq, &rng);
-        assign_random(&layer.attn_wk, &rng);
-        assign_random(&layer.attn_wv, &rng);
-        assign_random(&layer.attn_wo, &rng);
-        assign_random(&layer.mlp_fc1, &rng);
-        assign_random(&layer.mlp_fc2, &rng);
-    }
-    return model;
-}
-
-void load_model_from_f32(Model& model, const std::vector<float>& values) {
-    std::size_t cursor = 0;
-    auto load_into = [&](std::vector<double>* target) {
-        if (cursor + target->size() > values.size()) {
-            throw std::runtime_error("weights file is smaller than expected");
-        }
-        for (double& value : *target) {
-            value = static_cast<double>(values[cursor++]);
-        }
-    };
-
-    load_into(&model.wte);
-    load_into(&model.wpe);
-    load_into(&model.lm_head);
-    for (LayerWeights& layer : model.layers) {
-        load_into(&layer.attn_wq);
-        load_into(&layer.attn_wk);
-        load_into(&layer.attn_wv);
-        load_into(&layer.attn_wo);
-        load_into(&layer.mlp_fc1);
-        load_into(&layer.mlp_fc2);
-    }
-    if (cursor != values.size()) {
-        throw std::runtime_error("weights file is larger than expected");
-    }
-}
-
-std::vector<double> flatten_model_values(const Model& model) {
-    std::vector<double> values;
-    std::size_t total_size = model.wte.size() + model.wpe.size() + model.lm_head.size();
-    for (const LayerWeights& layer : model.layers) {
-        total_size += layer.attn_wq.size() + layer.attn_wk.size() + layer.attn_wv.size() + layer.attn_wo.size() +
-                      layer.mlp_fc1.size() + layer.mlp_fc2.size();
-    }
-    values.reserve(total_size);
-    append_values(&values, model.wte);
-    append_values(&values, model.wpe);
-    append_values(&values, model.lm_head);
-    for (const LayerWeights& layer : model.layers) {
-        append_values(&values, layer.attn_wq);
-        append_values(&values, layer.attn_wk);
-        append_values(&values, layer.attn_wv);
-        append_values(&values, layer.attn_wo);
-        append_values(&values, layer.mlp_fc1);
-        append_values(&values, layer.mlp_fc2);
-    }
-    return values;
-}
 
 KernelResult run_forward_backward(const Model& model, const std::vector<int>& tokens) {
     if (tokens.size() < 2) {
@@ -419,7 +393,7 @@ KernelResult run_forward_backward(const Model& model, const std::vector<int>& to
     result.grads = backward_pass(model, cache);
 
     for (const StepCache& step : cache.steps) {
-        append_values(&result.logits, step.logits);
+        result.logits.insert(result.logits.end(), step.logits.begin(), step.logits.end());
     }
     return result;
 }

@@ -35,6 +35,15 @@ const std::unordered_map<std::string, BenchmarkPreset> kBenchmarkPresets = {
     {"large", {ModelConfig{4, 256, 128, 8, 0}, 100}},
 };
 
+BatchTokens make_batch_of_one(const std::vector<int>& tokens) {
+    BatchTokens batch;
+    batch.tokens = tokens;
+    batch.seq_lens = {static_cast<int>(tokens.size())};
+    batch.batch_size = 1;
+    batch.max_seq_len = static_cast<int>(tokens.size());
+    return batch;
+}
+
 std::string require_value(int argc, char** argv, int* index) {
     if (*index + 1 >= argc) {
         throw std::runtime_error(std::string("missing value for option ") + argv[*index]);
@@ -204,19 +213,27 @@ int run_validate(const CliOptions& options) {
     const std::vector<int> tokens = parse_int_list(manifest.at("token_ids"));
     const double epsilon = std::stod(manifest.at("validation_epsilon"));
 
-    Model model = make_empty_model(config);
-    load_model_from_f32(model, read_f32_file(options.fixture_dir / manifest.at("weights_init_file")));
-    const KernelResult result = run_forward_backward(model, tokens);
+    Model host_model = make_empty_model(config);
+    load_model_from_f32(host_model, read_f32_file(options.fixture_dir / manifest.at("weights_init_file")));
+    DeviceModel device_model = upload_model_to_device(host_model);
+    const BatchTokens batch = make_batch_of_one(tokens);
+    try {
+        const KernelResult result = run_forward_backward_batched(device_model, batch);
 
-    compare_arrays("logits", result.logits, read_f32_file(options.fixture_dir / manifest.at("expected_logits_file")), epsilon);
-    compare_arrays("loss", {result.loss}, read_f32_file(options.fixture_dir / manifest.at("expected_loss_file")), epsilon);
-    compare_arrays(
-        "grads",
-        flatten_model_values(result.grads),
-        read_f32_file(options.fixture_dir / manifest.at("expected_grads_file")),
-        epsilon
-    );
-    std::cout << "validation=pass\n";
+        compare_arrays("logits", result.logits, read_f32_file(options.fixture_dir / manifest.at("expected_logits_file")), epsilon);
+        compare_arrays("loss", {result.loss}, read_f32_file(options.fixture_dir / manifest.at("expected_loss_file")), epsilon);
+        compare_arrays(
+            "grads",
+            flatten_model_values(result.grads),
+            read_f32_file(options.fixture_dir / manifest.at("expected_grads_file")),
+            epsilon
+        );
+        std::cout << "validation=pass\n";
+    } catch (...) {
+        free_device_model(&device_model);
+        throw;
+    }
+    free_device_model(&device_model);
     return 0;
 }
 
@@ -238,15 +255,23 @@ int run_benchmark(const CliOptions& options) {
     preset.config.vocab_size = static_cast<int>(uchars.size()) + 1;
     const int requested_steps = options.num_steps >= 0 ? options.num_steps : preset.steps;
     const int steps = std::min(requested_steps, static_cast<int>(docs.size()));
-    const Model model = initialize_model(preset.config, options.seed);
+    const Model host_model = initialize_model(preset.config, options.seed);
+    DeviceModel device_model = upload_model_to_device(host_model);
 
     double last_loss = 0.0;
     std::string last_doc;
-    for (int step = 0; step < steps; ++step) {
-        last_doc = docs[step];
-        const std::vector<int> tokens = encode_doc(last_doc, vocab, static_cast<int>(uchars.size()));
-        last_loss = run_forward_backward(model, tokens).loss;
+    try {
+        for (int step = 0; step < steps; ++step) {
+            last_doc = docs[step];
+            const std::vector<int> tokens = encode_doc(last_doc, vocab, static_cast<int>(uchars.size()));
+            const BatchTokens batch = make_batch_of_one(tokens);
+            last_loss = run_forward_backward_batched(device_model, batch).loss;
+        }
+    } catch (...) {
+        free_device_model(&device_model);
+        throw;
     }
+    free_device_model(&device_model);
 
     std::cout << "mode=benchmark "
               << "preset=" << options.preset << ' '

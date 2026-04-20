@@ -8,6 +8,8 @@
 make all
 ```
 
+Note: `parallel_cpp` is now a CUDA-only target. `make all` requires `nvcc` on `PATH`.
+
 ### Regenerate the validation fixture bundle
 
 ```bash
@@ -46,6 +48,8 @@ Parallel C++:
 build/parallel_cpp --mode validate --fixture-dir training_data/fixtures/small_case
 ```
 
+Note: `parallel_cpp` is an outline scaffold and requires a CUDA build. Validation will fail until you implement the CUDA compute path in `methods/parallel_cpp/kernel.cu`.
+
 ### Benchmark a single method
 
 Python reference:
@@ -75,6 +79,8 @@ build/parallel_cpp \
   --preset small
 ```
 
+Note: this binary currently demonstrates the host-side path and CUDA launch outline only. It will not produce a valid benchmark result until the compute kernels are implemented.
+
 Optional presets:
 
 - `small`
@@ -93,7 +99,7 @@ build/serial_cpp \
 
 ### Run the full benchmark sweep
 
-This rebuilds, regenerates fixtures, validates all methods, then times each valid method.
+This rebuilds, regenerates fixtures, validates all methods, then times each valid method once.
 
 ```bash
 bash scripts/run_benchmarks.sh
@@ -104,8 +110,10 @@ bash scripts/run_benchmarks.sh
 - `methods/serial_python/kernel.py`: Python reference forward/backward kernel.
 - `methods/serial_python/serial.py`: Python runner for fixture generation, validation, and benchmarking.
 - `methods/serial_cpp/kernel.cpp`: Serial C++ forward/backward kernel.
+- `methods/serial_cpp/utils.cpp`: Serial C++ model setup and serialization helpers kept separate from kernel math.
 - `methods/serial_cpp/main.cpp`: Serial C++ runner.
-- `methods/parallel_cpp/kernel.cpp`: Parallel method kernel. Right now this is the same as serial C++.
+- `methods/parallel_cpp/kernel.cu`: CUDA-target translation unit showing how to allocate buffers and launch placeholder kernels.
+- `methods/parallel_cpp/utils.cpp`: Parallel C++ model setup and serialization helpers kept separate from CUDA-specific code.
 - `methods/parallel_cpp/main.cpp`: Parallel method runner.
 - `training_data/datasets/names.txt`: dataset used for benchmarks.
 - `training_data/fixtures/small_case/`: deterministic validation data generated from Python.
@@ -128,12 +136,12 @@ The Python version is the reference implementation. It is used to generate deter
 
 Those files live in `training_data/fixtures/small_case/`. Validation works by loading the fixture weights, running the method’s forward/backward pass on the fixed token sequence from the manifest, and comparing the outputs against the Python ground truth within an epsilon.
 
-Benchmarking follows the original microGPT training shape more closely than before. Each executable loads the dataset, builds the vocabulary, initializes weights from the fixed seed, and then processes the first `k` names in dataset order, where `k` is the preset size or `--num-steps`. For each benchmark step it builds `[BOS] + doc + [BOS]`, runs the forward pass across that sequence, computes the next-token loss, and runs backward. The only thing intentionally omitted from the original training loop is the optimizer update. The outer script uses `/usr/bin/time -p` and reports median wall-clock time across five runs. This means timing includes process startup and dataset loading for every method equally.
+Benchmarking follows the original microGPT training shape more closely than before. Each executable loads the dataset, builds the vocabulary, initializes weights from the fixed seed, and then processes the first `k` names in dataset order, where `k` is the preset size or `--num-steps`. For each benchmark step it builds `[BOS] + doc + [BOS]`, runs the forward pass across that sequence, computes the next-token loss, and runs backward. The only thing intentionally omitted from the original training loop is the optimizer update. The outer script uses `/usr/bin/time -p` and reports the raw wall-clock `real` time from one run. This means timing includes process startup and dataset loading for every method equally.
 
 The current methods are:
 
 - `serial_python`: correctness reference and optional timing reference
 - `serial_cpp`: CPU baseline
-- `parallel_cpp`: placeholder for the future CUDA implementation
+- `parallel_cpp`: CUDA-target scaffold
 
-Right now `parallel_cpp` is just a copy of `serial_cpp`. The idea is that CUDA work should happen mainly inside the `parallel_cpp` kernel file, while the validation and benchmark harness stay stable.
+Right now `parallel_cpp` keeps a copied host-side flow similar to `serial_cpp` up to the point where actual forward/backward computation begins. After that boundary, the parallel method switches to a CUDA outline. `parallel_cpp` now builds only from the `.cu` translation unit and requires `nvcc`. The CUDA path is intentionally incomplete: it shows buffer upload, workspace allocation, placeholder kernel definitions, and example launch sites without implementing the transformer math for you.
