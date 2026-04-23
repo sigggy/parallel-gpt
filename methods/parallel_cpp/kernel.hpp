@@ -69,6 +69,7 @@ struct DeviceWorkspace {
   DeviceBuffer<int> tokens;
   DeviceBuffer<int> seq_lens;
   DeviceBuffer<double> embeddings;
+  DeviceBuffer<double> embeddings_output; 
   DeviceBuffer<double> hidden;
   DeviceBuffer<double> logits;
   DeviceBuffer<double> loss;

@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 
+#include <driver_types.h>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -172,6 +173,7 @@ DeviceWorkspace allocate_workspace(const ModelConfig& config, const BatchTokens&
         upload_buffer(&workspace.tokens, batch.tokens);
         upload_buffer(&workspace.seq_lens, batch.seq_lens);
         allocate_buffer(&workspace.embeddings, hidden_count, true);
+        allocate_buffer(&workspace.embeddings_output, hidden_count, true);
         allocate_buffer(&workspace.hidden, hidden_count, true);
         allocate_buffer(&workspace.logits, logits_count, true);
         allocate_buffer(&workspace.loss, 1, true);
@@ -187,6 +189,7 @@ void free_workspace(DeviceWorkspace* workspace) {
     free_buffer(&workspace->tokens);
     free_buffer(&workspace->seq_lens);
     free_buffer(&workspace->embeddings);
+    free_buffer(&workspace->embeddings_output);
     free_buffer(&workspace->hidden);
     free_buffer(&workspace->logits);
     free_buffer(&workspace->loss);
@@ -221,6 +224,36 @@ __global__ void embedding_lookup_kernel_outline(
     embeddings[idx] = token_val + pos_val;
 }
 
+__global__ void rmsnorm(
+    const double* input,
+    double* output,
+    int n_embd,
+    int useable_seq_len, 
+    int num_batches
+) {
+    int total_tokens = num_batches * useable_seq_len;
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (idx >= total_tokens) return;
+
+    int start = idx * n_embd;
+
+    double mean_square = 0.0;
+
+    for (int i = 0; i < n_embd; i++) {
+        double value = input[start + i];
+        mean_square += value * value;
+    }
+
+    mean_square /= (double)n_embd;
+
+    double scale = 1.0 / sqrt(mean_square + 1e-5);
+
+    for (int i = 0; i < n_embd; i++) {
+        output[start + i] = input[start + i] * scale;
+    }
+}
+
 __global__ void transformer_layer_kernel_outline(
     const double* layer_input,
     double* layer_output,
@@ -231,13 +264,7 @@ __global__ void transformer_layer_kernel_outline(
     int head_dim,
     int n_head
 ) {
-    // TODO:
-    // - decide whether one kernel handles the whole layer or whether QKV, attention,
-    //   output projection, and MLP should be separate launches
-    // - read from layer_input[b, t, :]
-    // - write the next hidden state into layer_output[b, t, :]
-    // - keep attention confined to the same batch item b
-    // - TODO: skip padded positions once padding is added
+
     (void)layer_input;
     (void)layer_output;
     (void)seq_lens;
@@ -303,22 +330,6 @@ __global__ void backward_kernel_outline(
 }
 
 void launch_embedding_outline(const DeviceModel& device_model, DeviceWorkspace* workspace, const ModelConfig& config, const BatchTokens& batch) {
-    // Pseudocode:
-    // const int usable_seq_len = outline_usable_seq_len(config, batch);
-    // const auto launch = make_1d_launch(batch.batch_size * usable_seq_len * config.n_embd);
-    // embedding_lookup_kernel_outline<<<launch.blocks, launch.threads>>>(
-    //     workspace->tokens.ptr,
-    //     device_model.wte.ptr,
-    //     device_model.wpe.ptr,
-    //     workspace->embeddings.ptr,
-    //     batch.batch_size,
-    //     batch.max_seq_len,
-    //     usable_seq_len,
-    //     config.n_embd);
-    // cuda_check(cudaGetLastError(), "launching embedding_lookup_kernel_outline");
-    //
-    // First implementation goal:
-    // - map one thread to one (batch, position, embedding_dim) element
     const int usable_seq_len = outline_usable_seq_len(config, batch);
     const auto launch = make_1d_launch(
         static_cast<std::size_t>(batch.batch_size) * static_cast<std::size_t>(usable_seq_len) *
@@ -353,6 +364,25 @@ void launch_transformer_outline(const DeviceModel&, DeviceWorkspace* workspace, 
     // const auto launch = make_1d_launch(batch.batch_size * batch.max_seq_len * config.n_embd);
     // transformer_layer_kernel_outline<<<launch.blocks, launch.threads>>>(...);
     // cuda_check(cudaGetLastError(), "launching transformer_layer_kernel_outline");
+    const int usable_seq_len = outline_usable_seq_len(config, batch);
+    const auto launch = make_1d_launch(
+        static_cast<std::size_t>(batch.batch_size) * static_cast<std::size_t>(usable_seq_len) *
+        static_cast<std::size_t>(config.n_embd)
+    );
+
+
+    rmsnorm<<<launch.blocks, launch.threads>>>(
+        workspace->embeddings.ptr,
+        workspace->embeddings_output.ptr,
+        config.n_embd,
+        usable_seq_len, 
+        batch.batch_size
+    );
+    cuda_check(cudaGetLastError(), "launching embedding_lookup_kernel_outline");
+    
+    
+
+
     (void)workspace;
     (void)config;
     (void)batch;
@@ -406,7 +436,7 @@ KernelResult run_forward_backward_batched(const DeviceModel& device_model, const
     DeviceWorkspace workspace = allocate_workspace(device_model.config, batch, usable_seq_len);
     try {
            launch_embedding_outline(device_model, &workspace, device_model.config, batch);
-    //     launch_transformer_outline(device_model, &workspace, device_model.config, batch);
+           launch_transformer_outline(device_model, &workspace, device_model.config, batch);
     //     launch_logits_and_loss_outline(device_model, &workspace, device_model.config, batch);
     //     launch_backward_outline(&workspace, device_model.config, batch);
     //     cuda_check(cudaDeviceSynchronize(), "synchronizing CUDA kernels");
