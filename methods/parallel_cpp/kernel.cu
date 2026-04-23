@@ -200,21 +200,25 @@ __global__ void embedding_lookup_kernel_outline(
     double* embeddings,
     int batch_size,
     int max_seq_len,
+    int usable_seq_len,
     int n_embd
 ) {
-    // TODO:
-    // - map each thread to one (batch, position, embedding_dim) element
-    // - recover (b, t, c) from the flat thread index
-    // - load wte[token_id, c]
-    // - load wpe[t, c]
-    // - store the summed embedding into embeddings[b, t, c]
-    (void)tokens;
-    (void)wte;
-    (void)wpe;
-    (void)embeddings;
-    (void)batch_size;
-    (void)max_seq_len;
-    (void)n_embd;
+    const int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    const int total = batch_size * usable_seq_len * n_embd;
+    if (idx >= total) {
+        return;
+    }
+
+    const int col = idx % n_embd;
+    const int token_slot = idx / n_embd;
+    const int pos = token_slot % usable_seq_len;
+    const int batch_idx = token_slot / usable_seq_len;
+    const int token_idx = batch_idx * max_seq_len + pos;
+    const int token_id = tokens[token_idx];
+
+    const double token_val = wte[token_id * n_embd + col];
+    const double pos_val = wpe[pos * n_embd + col];
+    embeddings[idx] = token_val + pos_val;
 }
 
 __global__ void transformer_layer_kernel_outline(
@@ -300,24 +304,37 @@ __global__ void backward_kernel_outline(
 
 void launch_embedding_outline(const DeviceModel& device_model, DeviceWorkspace* workspace, const ModelConfig& config, const BatchTokens& batch) {
     // Pseudocode:
-    // const auto launch = make_1d_launch(batch.batch_size * batch.max_seq_len * config.n_embd);
+    // const int usable_seq_len = outline_usable_seq_len(config, batch);
+    // const auto launch = make_1d_launch(batch.batch_size * usable_seq_len * config.n_embd);
     // embedding_lookup_kernel_outline<<<launch.blocks, launch.threads>>>(
     //     workspace->tokens.ptr,
-    //     workspace->seq_lens.ptr,
     //     device_model.wte.ptr,
     //     device_model.wpe.ptr,
     //     workspace->embeddings.ptr,
     //     batch.batch_size,
     //     batch.max_seq_len,
+    //     usable_seq_len,
     //     config.n_embd);
     // cuda_check(cudaGetLastError(), "launching embedding_lookup_kernel_outline");
     //
     // First implementation goal:
     // - map one thread to one (batch, position, embedding_dim) element
-    (void)device_model;
-    (void)workspace;
-    (void)config;
-    (void)batch;
+    const int usable_seq_len = outline_usable_seq_len(config, batch);
+    const auto launch = make_1d_launch(
+        static_cast<std::size_t>(batch.batch_size) * static_cast<std::size_t>(usable_seq_len) *
+        static_cast<std::size_t>(config.n_embd)
+    );
+    embedding_lookup_kernel_outline<<<launch.blocks, launch.threads>>>(
+        workspace->tokens.ptr,
+        device_model.wte.ptr,
+        device_model.wpe.ptr,
+        workspace->embeddings.ptr,
+        batch.batch_size,
+        batch.max_seq_len,
+        usable_seq_len,
+        config.n_embd
+    );
+    cuda_check(cudaGetLastError(), "launching embedding_lookup_kernel_outline");
 }
 
 void launch_transformer_outline(const DeviceModel&, DeviceWorkspace* workspace, const ModelConfig& config, const BatchTokens& batch) {
@@ -388,7 +405,7 @@ KernelResult run_forward_backward_batched(const DeviceModel& device_model, const
     //
     DeviceWorkspace workspace = allocate_workspace(device_model.config, batch, usable_seq_len);
     try {
-    //     launch_embedding_outline(device_model, &workspace, device_model.config, batch);
+           launch_embedding_outline(device_model, &workspace, device_model.config, batch);
     //     launch_transformer_outline(device_model, &workspace, device_model.config, batch);
     //     launch_logits_and_loss_outline(device_model, &workspace, device_model.config, batch);
     //     launch_backward_outline(&workspace, device_model.config, batch);
