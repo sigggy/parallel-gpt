@@ -74,7 +74,6 @@ struct DeviceModel {
 struct DeviceWorkspace {
   DeviceBuffer<int> tokens;
   DeviceBuffer<double> embeddings;
-  DeviceBuffer<double> embeddings_output; 
   DeviceBuffer<double> hidden;
   // Forward-only transformer workspace and caches for future CUDA kernels.
   DeviceBuffer<double> x;
