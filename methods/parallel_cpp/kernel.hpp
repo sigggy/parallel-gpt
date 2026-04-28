@@ -41,9 +41,23 @@ struct KernelResult {
 
 struct BatchTokens {
   std::vector<int> tokens;
+  // Flattened token IDs for the entire batch.
+  // Layout: [batch_size, max_seq_len] stored row-major.
+  // Access: tokens[b * max_seq_len + t]
+  // Each value is a token index into the vocabulary.
+
   std::vector<int> seq_lens;
+  // Length of each sequence INCLUDING the final target token.
+  // Size = batch_size.
+  // seq_lens[b] = number of valid tokens in sequence b.
+  // Used to know which positions are real vs padding (future use).
+
   int batch_size = 0;
+  // Number of sequences in the batch (B).
+
   int max_seq_len = 0;
+  // Maximum sequence length across the batch (T_max).
+  // Each sequence is padded to this length in `tokens`.
 };
 
 template <typename T> struct DeviceBuffer {

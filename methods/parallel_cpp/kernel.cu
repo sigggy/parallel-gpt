@@ -227,7 +227,7 @@ __global__ void embedding_lookup_kernel(
     embeddings[idx] = token_val + pos_val;
 }
 
-__global__ void rmsnorm(
+__global__ void rmsnorm_kernel(
     const double* input,
     double* output,
     int n_embd,
@@ -321,7 +321,7 @@ void launch_embedding(const DeviceModel& device_model, DeviceWorkspace* workspac
         static_cast<std::size_t>(batch.batch_size) * static_cast<std::size_t>(usable_seq_len) *
         static_cast<std::size_t>(config.n_embd)
     );
-    embedding_lookup_kernel_outline<<<launch.blocks, launch.threads>>>(
+    embedding_lookup_kernel<<<launch.blocks, launch.threads>>>(
         workspace->tokens.ptr,
         device_model.wte.ptr,
         device_model.wpe.ptr,
@@ -335,28 +335,24 @@ void launch_embedding(const DeviceModel& device_model, DeviceWorkspace* workspac
 }
 
 
-void launch_rmsnorm(const DeviceModel& device_model, DeviceWorkspace* workspace, const ModelConfig& config, const BatchTokens& batch) {
-    const int usable_seq_len = outline_usable_seq_len(config, batch);
+void launch_rmsnorm(DeviceWorkspace* workspace, int n_embd, int batch_size, int usable_seq_len) { 
     const auto launch = make_1d_launch(
-        static_cast<std::size_t>(batch.batch_size) * static_cast<std::size_t>(usable_seq_len) *
-        static_cast<std::size_t>(config.n_embd)
+        static_cast<std::size_t>(batch_size) * static_cast<std::size_t>(usable_seq_len) *
+        static_cast<std::size_t>(n_embd)
     );
-    embedding_lookup_kernel_outline<<<launch.blocks, launch.threads>>>(
-        workspace->tokens.ptr,
-        device_model.wte.ptr,
-        device_model.wpe.ptr,
+    rmsnorm_kernel<<<launch.blocks, launch.threads>>>(
         workspace->embeddings.ptr,
-        batch.batch_size,
-        batch.max_seq_len,
-        usable_seq_len,
-        config.n_embd
+        workspace->embeddings_output.ptr,
+        n_embd,
+        usable_seq_len, 
+        batch_size
     );
     cuda_check(cudaGetLastError(), "launching embedding_lookup_kernel_outline");
 }
 
 
 
-void launch_transformer(const DeviceModel&, DeviceWorkspace* workspace, const ModelConfig& config, const BatchTokens& batch) {
+void launch_transformer(const DeviceModel& device_model, DeviceWorkspace* workspace, const ModelConfig& config, const BatchTokens& batch) {
     /*
     embedding_lookup -> workspace.x
 
@@ -384,19 +380,8 @@ void launch_transformer(const DeviceModel&, DeviceWorkspace* workspace, const Mo
         static_cast<std::size_t>(config.n_embd)
     );
 
-    launch_embedding(const DeviceModel &device_model, DeviceWorkspace *workspace, const ModelConfig &config, const BatchTokens &batch);
-
-
-
-
-    rmsnorm<<<launch.blocks, launch.threads>>>(
-        workspace->embeddings.ptr,
-        workspace->embeddings_output.ptr,
-        config.n_embd,
-        usable_seq_len, 
-        batch.batch_size
-    );
-    cuda_check(cudaGetLastError(), "TODO FIX");
+    launch_embedding(device_model, workspace, config, batch);
+    launch_rmsnorm(workspace, config.n_embd, batch.batch_size, usable_seq_len)
 
     for (int layer_idx = 0; layer_idx < config.n_layer; ++layer_idx) {
         rmsnorm<<<launch.blocks, launch.threads>>>(
