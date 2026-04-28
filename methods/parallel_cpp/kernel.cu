@@ -254,6 +254,32 @@ __global__ void rmsnorm(
     }
 }
 
+
+__global__ void linear(
+    double* input, 
+    double* output, 
+    double* weights, 
+    int in_dim, 
+    int out_dim,
+    int num_batches, 
+    int useable_seq_len
+) {
+    int total_tokens = num_batches * useable_seq_len;
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (idx >= total_tokens) return;
+    
+    int start = idx * in_dim;
+
+    for (int out = 0; out < out_dim; ++out) {
+        double sum = 0.0;
+        for (int in = 0; in < in_dim; ++in) {
+            sum += weights[out * in_dim + in] * input[start + in];
+        }
+        output[start + out] = sum;
+    }
+}
+
 __global__ void transformer_layer_kernel_outline(
     const double* layer_input,
     double* layer_output,
@@ -378,7 +404,20 @@ void launch_transformer_outline(const DeviceModel&, DeviceWorkspace* workspace, 
         usable_seq_len, 
         batch.batch_size
     );
-    cuda_check(cudaGetLastError(), "launching embedding_lookup_kernel_outline");
+    cuda_check(cudaGetLastError(), "TODO FIX");
+
+    for (int layer_idx = 0; layer_idx < config.n_layer; ++layer_idx) {
+        rmsnorm<<<launch.blocks, launch.threads>>>(
+            workspace->embeddings_output.ptr,
+            workspace->embeddings_output.ptr,
+            config.n_embd,
+            usable_seq_len, 
+            batch.batch_size
+        );
+        cuda_check(cudaGetLastError(), "TODO FIX");
+
+
+    }
     
     
 
