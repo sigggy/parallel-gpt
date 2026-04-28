@@ -25,19 +25,8 @@ void validate_batch(const BatchTokens& batch) {
     if (batch.batch_size < 1) {
         throw std::runtime_error("batch must contain at least one sequence");
     }
-    if (static_cast<int>(batch.seq_lens.size()) != batch.batch_size) {
-        throw std::runtime_error("batch seq_lens size must match batch_size");
-    }
-    if (batch.max_seq_len < 2) {
+    if (batch.batch_seq_length < 2) {
         throw std::runtime_error("token sequence must contain at least one input and one target token");
-    }
-
-    // TODO: add padded batching support. For now we assume all sequences share
-    // the same max_seq_len and start with batch_size = 1.
-    for (int seq_len_with_targets : batch.seq_lens) {
-        if (seq_len_with_targets != batch.max_seq_len) {
-            throw std::runtime_error("parallel_cpp batching outline does not support padding yet");
-        }
     }
 }
 
@@ -160,7 +149,6 @@ DeviceWorkspace allocate_workspace(const ModelConfig& config, const BatchTokens&
 
     try {
         upload_buffer(&workspace.tokens, batch.tokens);
-        upload_buffer(&workspace.seq_lens, batch.seq_lens);
         allocate_buffer(&workspace.embeddings, hidden_count, true);
         allocate_buffer(&workspace.embeddings_output, hidden_count, true);
         allocate_buffer(&workspace.hidden, hidden_count, true);
@@ -183,7 +171,6 @@ DeviceWorkspace allocate_workspace(const ModelConfig& config, const BatchTokens&
 
 void free_workspace(DeviceWorkspace* workspace) {
     free_buffer(&workspace->tokens);
-    free_buffer(&workspace->seq_lens);
     free_buffer(&workspace->embeddings);
     free_buffer(&workspace->embeddings_output);
     free_buffer(&workspace->hidden);
@@ -205,7 +192,7 @@ __global__ void embedding_lookup_kernel(
     const double* wpe,
     double* embeddings,
     int batch_size,
-    int max_seq_len,
+    int batch_seq_length,
     int usable_seq_len,
     int n_embd
 ) {
@@ -219,7 +206,7 @@ __global__ void embedding_lookup_kernel(
     const int token_slot = idx / n_embd;
     const int pos = token_slot % usable_seq_len;
     const int batch_idx = token_slot / usable_seq_len;
-    const int token_idx = batch_idx * max_seq_len + pos;
+    const int token_idx = batch_idx * batch_seq_length + pos;
     const int token_id = tokens[token_idx];
 
     const double token_val = wte[token_id * n_embd + col];
@@ -293,9 +280,8 @@ __global__ void logits_and_loss_kernel_outline(
     const double* lm_head,
     double* logits,
     double* loss,
-    const int* seq_lens,
     int batch_size,
-    int max_seq_len,
+    int batch_seq_length,
     int n_embd,
     int vocab_size
 ) {
@@ -308,9 +294,8 @@ __global__ void logits_and_loss_kernel_outline(
     (void)lm_head;
     (void)logits;
     (void)loss;
-    (void)seq_lens;
     (void)batch_size;
-    (void)max_seq_len;
+    (void)batch_seq_length;
     (void)n_embd;
     (void)vocab_size;
 }
@@ -327,7 +312,7 @@ void launch_embedding(const DeviceModel& device_model, DeviceWorkspace* workspac
         device_model.wpe.ptr,
         workspace->embeddings.ptr,
         batch.batch_size,
-        batch.max_seq_len,
+        batch.batch_seq_length,
         usable_seq_len,
         config.n_embd
     );

@@ -38,9 +38,8 @@ const std::unordered_map<std::string, BenchmarkPreset> kBenchmarkPresets = {
 BatchTokens make_batch_of_one(const std::vector<int>& tokens) {
     BatchTokens batch;
     batch.tokens = tokens;
-    batch.seq_lens = {static_cast<int>(tokens.size())};
     batch.batch_size = 1;
-    batch.max_seq_len = static_cast<int>(tokens.size());
+    batch.batch_seq_length = static_cast<int>(tokens.size());
     return batch;
 }
 

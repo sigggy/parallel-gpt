@@ -42,22 +42,15 @@ struct KernelResult {
 struct BatchTokens {
   std::vector<int> tokens;
   // Flattened token IDs for the entire batch.
-  // Layout: [batch_size, max_seq_len] stored row-major.
-  // Access: tokens[b * max_seq_len + t]
+  // Layout: [batch_size, batch_seq_length] stored row-major.
+  // Access: tokens[b * batch_seq_length + t]
   // Each value is a token index into the vocabulary.
-
-  std::vector<int> seq_lens;
-  // Length of each sequence INCLUDING the final target token.
-  // Size = batch_size.
-  // seq_lens[b] = number of valid tokens in sequence b.
-  // Used to know which positions are real vs padding (future use).
 
   int batch_size = 0;
   // Number of sequences in the batch (B).
 
-  int max_seq_len = 0;
-  // Maximum sequence length across the batch (T_max).
-  // Each sequence is padded to this length in `tokens`.
+  int batch_seq_length = 0;
+  // Shared sequence length across the entire batch (T).
 };
 
 template <typename T> struct DeviceBuffer {
@@ -80,7 +73,6 @@ struct DeviceModel {
 
 struct DeviceWorkspace {
   DeviceBuffer<int> tokens;
-  DeviceBuffer<int> seq_lens;
   DeviceBuffer<double> embeddings;
   DeviceBuffer<double> embeddings_output; 
   DeviceBuffer<double> hidden;
@@ -104,7 +96,7 @@ struct KernelLaunch {
 
 inline int outline_usable_seq_len(const ModelConfig &config,
                                   const BatchTokens &batch) {
-  return std::min(config.block_size, batch.max_seq_len - 1);
+  return std::min(config.block_size, batch.batch_seq_length - 1);
 }
 
 inline KernelLaunch make_1d_launch(std::size_t work_items, int threads = 256) {
