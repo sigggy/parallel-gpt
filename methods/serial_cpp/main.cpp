@@ -203,7 +203,7 @@ int run_validate(const CliOptions& options) {
 
     // Input: manifest metadata plus the fixture files produced by the Python reference.
     // Transformation: rebuild the same model state and token sequence, then run the C++ kernel.
-    // Output: max-error checks for logits, loss, and gradients against the reference outputs.
+    // Output: max-error checks for logits and loss against the reference outputs.
     const std::filesystem::path manifest_path = options.fixture_dir / "manifest.txt";
     const auto manifest = parse_manifest(manifest_path);
     ModelConfig config;
@@ -218,16 +218,10 @@ int run_validate(const CliOptions& options) {
 
     Model model = make_empty_model(config);
     load_model_from_f32(model, read_f32_file(options.fixture_dir / manifest.at("weights_init_file")));
-    const KernelResult result = run_forward_backward(model, tokens);
+    const KernelResult result = run_forward(model, tokens);
 
     compare_arrays("logits", result.logits, read_f32_file(options.fixture_dir / manifest.at("expected_logits_file")), epsilon);
     compare_arrays("loss", {result.loss}, read_f32_file(options.fixture_dir / manifest.at("expected_loss_file")), epsilon);
-    compare_arrays(
-        "grads",
-        flatten_model_values(result.grads),
-        read_f32_file(options.fixture_dir / manifest.at("expected_grads_file")),
-        epsilon
-    );
     std::cout << "validation=pass\n";
     return 0;
 }
@@ -253,14 +247,14 @@ int run_benchmark(const CliOptions& options) {
     const Model model = initialize_model(preset.config, options.seed);
 
     // Input: the dataset names in file order.
-    // Transformation: tokenize each name and run one forward/backward pass per example.
+    // Transformation: tokenize each name and run one forward pass per example.
     // Output: the loss from the last processed document, which is printed for benchmarking.
     double last_loss = 0.0;
     std::string last_doc;
     for (int step = 0; step < steps; ++step) {
         last_doc = docs[step];
         const std::vector<int> tokens = encode_doc(last_doc, vocab, static_cast<int>(uchars.size()));
-        last_loss = run_forward_backward(model, tokens).loss;
+        last_loss = run_forward(model, tokens).loss;
     }
 
     std::cout << "mode=benchmark "

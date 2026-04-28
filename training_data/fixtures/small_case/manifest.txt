@@ -11,4 +11,3 @@ validation_epsilon=0.0001
 weights_init_file=weights_init.bin
 expected_logits_file=expected_logits.bin
 expected_loss_file=expected_loss.bin
-expected_grads_file=expected_grads.bin

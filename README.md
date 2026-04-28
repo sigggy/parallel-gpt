@@ -107,9 +107,9 @@ bash scripts/run_benchmarks.sh
 
 ## Repo Layout
 
-- `methods/serial_python/kernel.py`: Python reference forward/backward kernel.
+- `methods/serial_python/kernel.py`: Python reference forward kernel.
 - `methods/serial_python/serial.py`: Python runner for fixture generation, validation, and benchmarking.
-- `methods/serial_cpp/kernel.cpp`: Serial C++ forward/backward kernel.
+- `methods/serial_cpp/kernel.cpp`: Serial C++ forward kernel.
 - `methods/serial_cpp/utils.cpp`: Serial C++ model setup and serialization helpers kept separate from kernel math.
 - `methods/serial_cpp/main.cpp`: Serial C++ runner.
 - `methods/parallel_cpp/kernel.cu`: CUDA-target translation unit showing how to allocate buffers and launch placeholder kernels.
@@ -120,23 +120,22 @@ bash scripts/run_benchmarks.sh
 
 ## How It Works
 
-The project is built around one narrow workload: repeated forward pass plus backward pass on tokenized name data. The point is to compare implementations of the same kernel, not to build a full training framework.
+The project is built around one narrow workload: repeated forward passes on tokenized name data with next-token loss. The point is to compare implementations of the same kernel, not to build a full training framework.
 
 Each method has the same shape:
 
 - a thin runner file for CLI, dataset loading, and validation/benchmark orchestration
-- a kernel file containing the actual GPT forward/backward implementation
+- a kernel file containing the actual GPT forward implementation
 
 The Python version is the reference implementation. It is used to generate deterministic ground-truth files for:
 
 - initial weights
 - expected logits
 - expected scalar loss
-- expected gradients
 
-Those files live in `training_data/fixtures/small_case/`. Validation works by loading the fixture weights, running the method’s forward/backward pass on the fixed token sequence from the manifest, and comparing the outputs against the Python ground truth within an epsilon.
+Those files live in `training_data/fixtures/small_case/`. Validation works by loading the fixture weights, running the method’s forward pass on the fixed token sequence from the manifest, and comparing the outputs against the Python ground truth within an epsilon.
 
-Benchmarking follows the original microGPT training shape more closely than before. Each executable loads the dataset, builds the vocabulary, initializes weights from the fixed seed, and then processes the first `k` names in dataset order, where `k` is the preset size or `--num-steps`. For each benchmark step it builds `[BOS] + doc + [BOS]`, runs the forward pass across that sequence, computes the next-token loss, and runs backward. The only thing intentionally omitted from the original training loop is the optimizer update. The outer script uses `/usr/bin/time -p` and reports the raw wall-clock `real` time from one run. This means timing includes process startup and dataset loading for every method equally.
+Benchmarking keeps the GPT-style data flow without the training update. Each executable loads the dataset, builds the vocabulary, initializes weights from the fixed seed, and then processes the first `k` names in dataset order, where `k` is the preset size or `--num-steps`. For each benchmark step it builds `[BOS] + doc + [BOS]`, runs the forward pass across that sequence, and computes the next-token loss. The outer script uses `/usr/bin/time -p` and reports the raw wall-clock `real` time from one run. This means timing includes process startup and dataset loading for every method equally.
 
 The current methods are:
 
@@ -144,4 +143,4 @@ The current methods are:
 - `serial_cpp`: CPU baseline
 - `parallel_cpp`: CUDA-target scaffold
 
-Right now `parallel_cpp` keeps a copied host-side flow similar to `serial_cpp` up to the point where actual forward/backward computation begins. After that boundary, the parallel method switches to a CUDA outline. `parallel_cpp` now builds only from the `.cu` translation unit and requires `nvcc`. The CUDA path is intentionally incomplete: it shows buffer upload, workspace allocation, placeholder kernel definitions, and example launch sites without implementing the transformer math for you.
+Right now `parallel_cpp` keeps a copied host-side flow similar to `serial_cpp` up to the point where actual forward computation begins. After that boundary, the parallel method switches to a CUDA outline. `parallel_cpp` now builds only from the `.cu` translation unit and requires `nvcc`. The CUDA path is intentionally incomplete: it shows buffer upload, workspace allocation, placeholder kernel definitions, and example launch sites without implementing the transformer math for you.

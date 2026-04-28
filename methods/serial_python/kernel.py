@@ -16,34 +16,30 @@ class ModelConfig:
 
 
 class Value:
-    __slots__ = ("data", "grad", "_children", "_local_grads")
+    __slots__ = ("data",)
 
-    def __init__(self, data, children=(), local_grads=()):
+    def __init__(self, data):
         self.data = data
-        self.grad = 0
-        self._children = children
-        self._local_grads = local_grads
 
     def __add__(self, other):
         other = other if isinstance(other, Value) else Value(other)
-        return Value(self.data + other.data, (self, other), (1, 1))
+        return Value(self.data + other.data)
 
     def __mul__(self, other):
         other = other if isinstance(other, Value) else Value(other)
-        return Value(self.data * other.data, (self, other), (other.data, self.data))
+        return Value(self.data * other.data)
 
     def __pow__(self, other):
-        return Value(self.data**other, (self,), (other * self.data ** (other - 1),))
+        return Value(self.data**other)
 
     def log(self):
-        return Value(math.log(self.data), (self,), (1 / self.data,))
+        return Value(math.log(self.data))
 
     def exp(self):
-        exp_val = math.exp(self.data)
-        return Value(exp_val, (self,), (exp_val,))
+        return Value(math.exp(self.data))
 
     def relu(self):
-        return Value(max(0, self.data), (self,), (float(self.data > 0),))
+        return Value(max(0, self.data))
 
     def __neg__(self):
         return self * -1
@@ -65,24 +61,6 @@ class Value:
 
     def __rtruediv__(self, other):
         return other * self**-1
-
-    def backward(self):
-        topo = []
-        visited = set()
-
-        def build_topo(node):
-            if node not in visited:
-                visited.add(node)
-                for child in node._children:
-                    build_topo(child)
-                topo.append(node)
-
-        build_topo(self)
-        self.grad = 1
-        for node in reversed(topo):
-            for child, local_grad in zip(node._children, node._local_grads):
-                child.grad += local_grad * node.grad
-
 
 def state_dict_order(config):
     names = ["wte", "wpe", "lm_head"]
@@ -132,15 +110,6 @@ def flatten_params(state_dict, config):
 
 def flatten_param_values(state_dict, config):
     return [param.data for param in flatten_params(state_dict, config)]
-
-
-def flatten_param_grads(params):
-    return [param.grad for param in params]
-
-
-def zero_grads(params):
-    for param in params:
-        param.grad = 0
 
 
 def linear(x, w):
@@ -199,8 +168,7 @@ def gpt(token_id, pos_id, keys, values, state_dict, config):
     return linear(x, state_dict["lm_head"])
 
 
-def run_forward_backward(tokens, state_dict, params, config):
-    zero_grads(params)
+def run_forward(tokens, state_dict, config):
     seq_len = min(config.block_size, len(tokens) - 1)
     keys = [[] for _ in range(config.n_layer)]
     values = [[] for _ in range(config.n_layer)]
@@ -214,10 +182,8 @@ def run_forward_backward(tokens, state_dict, params, config):
         probs = softmax(logits)
         losses.append(-probs[target_id].log())
     loss = (1 / seq_len) * sum(losses)
-    loss.backward()
     return {
         "seq_len": seq_len,
         "logits": [[value.data for value in row] for row in logits_per_position],
         "loss": loss.data,
-        "grads": flatten_param_grads(params),
     }

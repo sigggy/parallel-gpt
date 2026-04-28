@@ -35,11 +35,10 @@ struct KernelResult {
     int seq_len = 0;
     std::vector<double> logits;
     double loss = 0.0;
-    Model grads;
 };
 
 Model make_empty_model(const ModelConfig& config);
 Model initialize_model(const ModelConfig& config, std::uint32_t seed);
 void load_model_from_f32(Model& model, const std::vector<float>& values);
 std::vector<double> flatten_model_values(const Model& model);
-KernelResult run_forward_backward(const Model& model, const std::vector<int>& tokens);
+KernelResult run_forward(const Model& model, const std::vector<int>& tokens);

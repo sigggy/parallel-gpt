@@ -9,7 +9,7 @@ import argparse
 import struct
 from pathlib import Path
 
-from kernel import ModelConfig, flatten_param_values, init_model, run_forward_backward
+from kernel import ModelConfig, flatten_param_values, init_model, run_forward
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -126,8 +126,8 @@ def parse_args():
 def dump_fixtures(dataset_path: Path, fixture_dir: Path, sample_name: str, seed: int):
     uchars, tokens = load_tokens(dataset_path, sample_name)
     config = ModelConfig()
-    state_dict, params = init_model(config, len(uchars) + 1, seed)
-    result = run_forward_backward(tokens, state_dict, params, config)
+    state_dict, _ = init_model(config, len(uchars) + 1, seed)
+    result = run_forward(tokens, state_dict, config)
     fixture_dir.mkdir(parents=True, exist_ok=True)
 
     manifest_lines = [
@@ -144,14 +144,12 @@ def dump_fixtures(dataset_path: Path, fixture_dir: Path, sample_name: str, seed:
         "weights_init_file=weights_init.bin",
         "expected_logits_file=expected_logits.bin",
         "expected_loss_file=expected_loss.bin",
-        "expected_grads_file=expected_grads.bin",
     ]
 
     (fixture_dir / "manifest.txt").write_text("\n".join(manifest_lines) + "\n")
     write_f32_file(fixture_dir / "weights_init.bin", flatten_param_values(state_dict, config))
     write_f32_file(fixture_dir / "expected_logits.bin", [value for row in result["logits"] for value in row])
     write_f32_file(fixture_dir / "expected_loss.bin", [result["loss"]])
-    write_f32_file(fixture_dir / "expected_grads.bin", result["grads"])
     print(f"wrote fixture bundle to {fixture_dir}")
 
 
@@ -167,13 +165,12 @@ def validate_fixture(fixture_dir: Path, seed: int):
     tokens = parse_int_list(manifest["token_ids"])
     epsilon = float(manifest["validation_epsilon"])
 
-    state_dict, params = init_model(config, vocab_size, seed)
+    state_dict, _ = init_model(config, vocab_size, seed)
     load_model_from_f32(state_dict, config, read_f32_file(fixture_dir / manifest["weights_init_file"]))
-    result = run_forward_backward(tokens, state_dict, params, config)
+    result = run_forward(tokens, state_dict, config)
 
     compare_arrays("logits", [value for row in result["logits"] for value in row], read_f32_file(fixture_dir / manifest["expected_logits_file"]), epsilon)
     compare_arrays("loss", [result["loss"]], read_f32_file(fixture_dir / manifest["expected_loss_file"]), epsilon)
-    compare_arrays("grads", result["grads"], read_f32_file(fixture_dir / manifest["expected_grads_file"]), epsilon)
     print("validation=pass")
 
 
@@ -186,13 +183,13 @@ def run_benchmark(dataset_path: Path, seed: int, preset_name: str, num_steps: in
     config = preset["config"]
     requested_steps = num_steps if num_steps is not None else preset["steps"]
     steps = min(requested_steps, len(docs))
-    state_dict, params = init_model(config, len(uchars) + 1, seed)
+    state_dict, _ = init_model(config, len(uchars) + 1, seed)
     last_result = None
     last_doc = ""
     for step_idx in range(steps):
         last_doc = docs[step_idx]
         tokens = encode_doc(last_doc, vocab, bos)
-        last_result = run_forward_backward(tokens, state_dict, params, config)
+        last_result = run_forward(tokens, state_dict, config)
     print(
         "mode=benchmark "
         f"preset={preset_name} "

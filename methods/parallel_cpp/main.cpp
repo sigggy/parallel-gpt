@@ -218,16 +218,10 @@ int run_validate(const CliOptions& options) {
     DeviceModel device_model = upload_model_to_device(host_model);
     const BatchTokens batch = make_batch_of_one(tokens);
     try {
-        const KernelResult result = run_forward_backward_batched(device_model, batch);
+        const KernelResult result = run_forward_batched(device_model, batch);
 
         compare_arrays("logits", result.logits, read_f32_file(options.fixture_dir / manifest.at("expected_logits_file")), epsilon);
         compare_arrays("loss", {result.loss}, read_f32_file(options.fixture_dir / manifest.at("expected_loss_file")), epsilon);
-        compare_arrays(
-            "grads",
-            flatten_model_values(result.grads),
-            read_f32_file(options.fixture_dir / manifest.at("expected_grads_file")),
-            epsilon
-        );
         std::cout << "validation=pass\n";
     } catch (...) {
         free_device_model(&device_model);
@@ -265,7 +259,7 @@ int run_benchmark(const CliOptions& options) {
             last_doc = docs[step];
             const std::vector<int> tokens = encode_doc(last_doc, vocab, static_cast<int>(uchars.size()));
             const BatchTokens batch = make_batch_of_one(tokens);
-            last_loss = run_forward_backward_batched(device_model, batch).loss;
+            last_loss = run_forward_batched(device_model, batch).loss;
         }
     } catch (...) {
         free_device_model(&device_model);

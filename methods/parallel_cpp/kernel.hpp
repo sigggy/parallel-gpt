@@ -37,7 +37,6 @@ struct KernelResult {
   int seq_len = 0;
   std::vector<double> logits;
   double loss = 0.0;
-  Model grads;
 };
 
 struct BatchTokens {
@@ -71,9 +70,17 @@ struct DeviceWorkspace {
   DeviceBuffer<double> embeddings;
   DeviceBuffer<double> embeddings_output; 
   DeviceBuffer<double> hidden;
+  // Forward-only transformer workspace and caches for future CUDA kernels.
+  DeviceBuffer<double> x;
+  DeviceBuffer<double> x_tmp;
+  DeviceBuffer<double> norm;
+  DeviceBuffer<double> q;
+  DeviceBuffer<double> k_cache;
+  DeviceBuffer<double> v_cache;
+  DeviceBuffer<double> attn_out;
+  DeviceBuffer<double> mlp_hidden;
   DeviceBuffer<double> logits;
   DeviceBuffer<double> loss;
-  DeviceBuffer<double> grads;
 };
 
 struct KernelLaunch {
@@ -104,5 +111,5 @@ void load_model_from_f32(Model &host_model, const std::vector<float> &values);
 std::vector<double> flatten_model_values(const Model &host_model);
 DeviceModel upload_model_to_device(const Model &host_model);
 void free_device_model(DeviceModel *device_model);
-KernelResult run_forward_backward_batched(const DeviceModel &device_model,
-                                          const BatchTokens &batch);
+KernelResult run_forward_batched(const DeviceModel &device_model,
+                                 const BatchTokens &batch);

@@ -21,18 +21,6 @@ void free_workspace(DeviceWorkspace* workspace);
 template <typename T>
 void free_buffer(DeviceBuffer<T>* device_buffer);
 
-std::size_t model_value_count(const ModelConfig& config) {
-    std::size_t total_size = 0;
-    total_size += static_cast<std::size_t>(config.vocab_size) * static_cast<std::size_t>(config.n_embd);   // wte
-    total_size += static_cast<std::size_t>(config.block_size) * static_cast<std::size_t>(config.n_embd);   // wpe
-    total_size += static_cast<std::size_t>(config.vocab_size) * static_cast<std::size_t>(config.n_embd);   // lm_head
-
-    const std::size_t square = static_cast<std::size_t>(config.n_embd) * static_cast<std::size_t>(config.n_embd);
-    const std::size_t mlp = static_cast<std::size_t>(config.mlp_dim()) * static_cast<std::size_t>(config.n_embd);
-    total_size += static_cast<std::size_t>(config.n_layer) * (4 * square + 2 * mlp);
-    return total_size;
-}
-
 void validate_batch(const BatchTokens& batch) {
     if (batch.batch_size < 1) {
         throw std::runtime_error("batch must contain at least one sequence");
@@ -166,8 +154,9 @@ DeviceWorkspace allocate_workspace(const ModelConfig& config, const BatchTokens&
     const std::size_t sequence_count = static_cast<std::size_t>(batch.batch_size);
     const std::size_t time_steps = static_cast<std::size_t>(usable_seq_len);
     const std::size_t hidden_count = sequence_count * time_steps * static_cast<std::size_t>(config.n_embd);
+    const std::size_t kv_cache_count = static_cast<std::size_t>(config.n_layer) * hidden_count;
+    const std::size_t mlp_hidden_count = sequence_count * time_steps * static_cast<std::size_t>(config.mlp_dim());
     const std::size_t logits_count = sequence_count * time_steps * static_cast<std::size_t>(config.vocab_size);
-    const std::size_t grad_count = model_value_count(config);
 
     try {
         upload_buffer(&workspace.tokens, batch.tokens);
@@ -175,9 +164,16 @@ DeviceWorkspace allocate_workspace(const ModelConfig& config, const BatchTokens&
         allocate_buffer(&workspace.embeddings, hidden_count, true);
         allocate_buffer(&workspace.embeddings_output, hidden_count, true);
         allocate_buffer(&workspace.hidden, hidden_count, true);
+        allocate_buffer(&workspace.x, hidden_count, true);
+        allocate_buffer(&workspace.x_tmp, hidden_count, true);
+        allocate_buffer(&workspace.norm, hidden_count, true);
+        allocate_buffer(&workspace.q, hidden_count, true);
+        allocate_buffer(&workspace.k_cache, kv_cache_count, true);
+        allocate_buffer(&workspace.v_cache, kv_cache_count, true);
+        allocate_buffer(&workspace.attn_out, hidden_count, true);
+        allocate_buffer(&workspace.mlp_hidden, mlp_hidden_count, true);
         allocate_buffer(&workspace.logits, logits_count, true);
         allocate_buffer(&workspace.loss, 1, true);
-        allocate_buffer(&workspace.grads, grad_count, true);
     } catch (...) {
         free_workspace(&workspace);
         throw;
@@ -191,12 +187,19 @@ void free_workspace(DeviceWorkspace* workspace) {
     free_buffer(&workspace->embeddings);
     free_buffer(&workspace->embeddings_output);
     free_buffer(&workspace->hidden);
+    free_buffer(&workspace->x);
+    free_buffer(&workspace->x_tmp);
+    free_buffer(&workspace->norm);
+    free_buffer(&workspace->q);
+    free_buffer(&workspace->k_cache);
+    free_buffer(&workspace->v_cache);
+    free_buffer(&workspace->attn_out);
+    free_buffer(&workspace->mlp_hidden);
     free_buffer(&workspace->logits);
     free_buffer(&workspace->loss);
-    free_buffer(&workspace->grads);
 }
 
-__global__ void embedding_lookup_kernel_outline(
+__global__ void embedding_lookup_kernel(
     const int* tokens,
     const double* wte,
     const double* wpe,
@@ -256,50 +259,33 @@ __global__ void rmsnorm(
 
 
 __global__ void linear(
-    double* input, 
-    double* output, 
-    double* weights, 
-    int in_dim, 
+    const double* input,
+    double* output,
+    const double* weights,
+    int in_dim,
     int out_dim,
-    int num_batches, 
-    int useable_seq_len
+    int num_batches,
+    int usable_seq_len
 ) {
-    int total_tokens = num_batches * useable_seq_len;
+    int total_tokens = num_batches * usable_seq_len;
     int idx = blockDim.x * blockIdx.x + threadIdx.x;
 
     if (idx >= total_tokens) return;
-    
-    int start = idx * in_dim;
+
+    int input_start = idx * in_dim;
+    int output_start = idx * out_dim;
 
     for (int out = 0; out < out_dim; ++out) {
         double sum = 0.0;
+
         for (int in = 0; in < in_dim; ++in) {
-            sum += weights[out * in_dim + in] * input[start + in];
+            sum += weights[out * in_dim + in] * input[input_start + in];
         }
-        output[start + out] = sum;
+
+        output[output_start + out] = sum;
     }
 }
 
-__global__ void transformer_layer_kernel_outline(
-    const double* layer_input,
-    double* layer_output,
-    const int* seq_lens,
-    int batch_size,
-    int max_seq_len,
-    int n_embd,
-    int head_dim,
-    int n_head
-) {
-
-    (void)layer_input;
-    (void)layer_output;
-    (void)seq_lens;
-    (void)batch_size;
-    (void)max_seq_len;
-    (void)n_embd;
-    (void)head_dim;
-    (void)n_head;
-}
 
 __global__ void logits_and_loss_kernel_outline(
     const double* hidden,
@@ -329,33 +315,7 @@ __global__ void logits_and_loss_kernel_outline(
     (void)vocab_size;
 }
 
-__global__ void backward_kernel_outline(
-    const int* tokens,
-    const double* hidden,
-    const double* logits,
-    double* grads,
-    const int* seq_lens,
-    int batch_size,
-    int max_seq_len,
-    int n_embd,
-    int vocab_size
-) {
-    // TODO:
-    // - choose how you want to store intermediate activations for backward
-    // - write gradients into the flattened grads buffer
-    // - keep indexing batch-ready as (b, t, ...)
-    (void)tokens;
-    (void)hidden;
-    (void)logits;
-    (void)grads;
-    (void)seq_lens;
-    (void)batch_size;
-    (void)max_seq_len;
-    (void)n_embd;
-    (void)vocab_size;
-}
-
-void launch_embedding_outline(const DeviceModel& device_model, DeviceWorkspace* workspace, const ModelConfig& config, const BatchTokens& batch) {
+void launch_embedding(const DeviceModel& device_model, DeviceWorkspace* workspace, const ModelConfig& config, const BatchTokens& batch) {
     const int usable_seq_len = outline_usable_seq_len(config, batch);
     const auto launch = make_1d_launch(
         static_cast<std::size_t>(batch.batch_size) * static_cast<std::size_t>(usable_seq_len) *
@@ -374,27 +334,59 @@ void launch_embedding_outline(const DeviceModel& device_model, DeviceWorkspace* 
     cuda_check(cudaGetLastError(), "launching embedding_lookup_kernel_outline");
 }
 
-void launch_transformer_outline(const DeviceModel&, DeviceWorkspace* workspace, const ModelConfig& config, const BatchTokens& batch) {
-    // Pseudocode:
-    // for each transformer layer:
-    //   choose either:
-    //   A) one coarse kernel for the whole layer, or
-    //   B) separate kernels for
-    //      - norm
-    //      - qkv projection
-    //      - attention scores / softmax
-    //      - attention output projection
-    //      - mlp
-    //
-    // Example starting point for a coarse launch:
-    // const auto launch = make_1d_launch(batch.batch_size * batch.max_seq_len * config.n_embd);
-    // transformer_layer_kernel_outline<<<launch.blocks, launch.threads>>>(...);
-    // cuda_check(cudaGetLastError(), "launching transformer_layer_kernel_outline");
+
+void launch_rmsnorm(const DeviceModel& device_model, DeviceWorkspace* workspace, const ModelConfig& config, const BatchTokens& batch) {
     const int usable_seq_len = outline_usable_seq_len(config, batch);
     const auto launch = make_1d_launch(
         static_cast<std::size_t>(batch.batch_size) * static_cast<std::size_t>(usable_seq_len) *
         static_cast<std::size_t>(config.n_embd)
     );
+    embedding_lookup_kernel_outline<<<launch.blocks, launch.threads>>>(
+        workspace->tokens.ptr,
+        device_model.wte.ptr,
+        device_model.wpe.ptr,
+        workspace->embeddings.ptr,
+        batch.batch_size,
+        batch.max_seq_len,
+        usable_seq_len,
+        config.n_embd
+    );
+    cuda_check(cudaGetLastError(), "launching embedding_lookup_kernel_outline");
+}
+
+
+
+void launch_transformer(const DeviceModel&, DeviceWorkspace* workspace, const ModelConfig& config, const BatchTokens& batch) {
+    /*
+    embedding_lookup -> workspace.x
+
+    for each layer:
+        rmsnorm(x -> norm)
+        linear(norm -> q)
+        linear(norm -> k_cache[layer])
+        linear(norm -> v_cache[layer])
+        attention(q, k_cache[layer], v_cache[layer] -> attn_out)
+        linear(attn_out -> x_tmp)
+        residual_add(x, x_tmp -> x)
+
+        rmsnorm(x -> norm)
+        linear(norm -> mlp_hidden)
+        relu(mlp_hidden)
+        linear(mlp_hidden -> x_tmp)
+        residual_add(x, x_tmp -> x)
+
+    logits_and_loss(x -> logits/loss)
+    */
+
+    const int usable_seq_len = outline_usable_seq_len(config, batch);
+    const auto launch = make_1d_launch(
+        static_cast<std::size_t>(batch.batch_size) * static_cast<std::size_t>(usable_seq_len) *
+        static_cast<std::size_t>(config.n_embd)
+    );
+
+    launch_embedding(const DeviceModel &device_model, DeviceWorkspace *workspace, const ModelConfig &config, const BatchTokens &batch);
+
+
 
 
     rmsnorm<<<launch.blocks, launch.threads>>>(
@@ -440,18 +432,6 @@ void launch_logits_and_loss_outline(const DeviceModel& device_model, DeviceWorks
     (void)batch;
 }
 
-void launch_backward_outline(DeviceWorkspace* workspace, const ModelConfig& config, const BatchTokens& batch) {
-    // Pseudocode:
-    // - decide what forward intermediates backward needs
-    // - either:
-    //   A) one coarse backward kernel, or
-    //   B) a sequence of backward kernels mirroring the forward stages
-    // - write gradients into the flattened workspace->grads buffer
-    (void)workspace;
-    (void)config;
-    (void)batch;
-}
-
 }  // namespace
 
 DeviceModel upload_model_to_device(const Model& host_model) {
@@ -466,7 +446,7 @@ void free_device_model(DeviceModel* device_model) {
     device_model->config = ModelConfig{};
 }
 
-KernelResult run_forward_backward_batched(const DeviceModel& device_model, const BatchTokens& batch) {
+KernelResult run_forward_batched(const DeviceModel& device_model, const BatchTokens& batch) {
     validate_batch(batch);
     const int usable_seq_len = outline_usable_seq_len(device_model.config, batch);
 
@@ -474,15 +454,13 @@ KernelResult run_forward_backward_batched(const DeviceModel& device_model, const
     //
     DeviceWorkspace workspace = allocate_workspace(device_model.config, batch, usable_seq_len);
     try {
-           launch_embedding_outline(device_model, &workspace, device_model.config, batch);
-           launch_transformer_outline(device_model, &workspace, device_model.config, batch);
+           launch_transformer(device_model, &workspace, device_model.config, batch);
     //     launch_logits_and_loss_outline(device_model, &workspace, device_model.config, batch);
-    //     launch_backward_outline(&workspace, device_model.config, batch);
     //     cuda_check(cudaDeviceSynchronize(), "synchronizing CUDA kernels");
-    //     // copy logits / loss / grads back to host
+    //     // copy logits / loss back to host
     //     // pack a KernelResult and return it
         throw std::runtime_error(
-            "parallel_cpp CUDA outline launched placeholder kernels only. Fill in methods/parallel_cpp/kernel.cu to produce logits, loss, and gradients."
+            "parallel_cpp CUDA outline launched placeholder kernels only. Fill in methods/parallel_cpp/kernel.cu to produce logits and loss."
         );
     } catch (...) {
         free_workspace(&workspace);
