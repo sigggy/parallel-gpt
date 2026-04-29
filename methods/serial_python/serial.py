@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import struct
+import time
 from pathlib import Path
 
 from kernel import ModelConfig, flatten_param_values, init_model, run_forward
@@ -175,6 +176,7 @@ def validate_fixture(fixture_dir: Path, seed: int):
 
 
 def run_benchmark(dataset_path: Path, seed: int, preset_name: str, num_steps: int | None):
+    benchmark_start = time.perf_counter()
     docs = load_docs(dataset_path)
     if not docs:
         raise ValueError(f"dataset is empty: {dataset_path}")
@@ -186,17 +188,23 @@ def run_benchmark(dataset_path: Path, seed: int, preset_name: str, num_steps: in
     state_dict, _ = init_model(config, len(uchars) + 1, seed)
     last_result = None
     last_doc = ""
+    forward_pass_seconds_cumulative = 0.0
     for step_idx in range(steps):
         last_doc = docs[step_idx]
         tokens = encode_doc(last_doc, vocab, bos)
+        forward_start = time.perf_counter()
         last_result = run_forward(tokens, state_dict, config)
+        forward_pass_seconds_cumulative += time.perf_counter() - forward_start
+    total_program_seconds = time.perf_counter() - benchmark_start
     print(
         "mode=benchmark "
         f"preset={preset_name} "
         f"requested_steps={requested_steps} "
         f"steps={steps} "
         f"last_doc={last_doc} "
-        f"loss={last_result['loss']:.6f}"
+        f"loss={last_result['loss']:.6f} "
+        f"forward_pass_seconds_cumulative={forward_pass_seconds_cumulative:.8f} "
+        f"total_program_seconds={total_program_seconds:.8f}"
     )
 
 

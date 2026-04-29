@@ -91,6 +91,47 @@ std::vector<double> rmsnorm(const std::vector<double>& input) {
     return output;
 }
 
+std::vector<double> attention_sublayer(
+    const std::vector<StepForwardCache>& cache,
+    int layer_idx,
+    int pos,
+    const std::vector<double>& x,
+    LayerStepCache* layer_step,
+    const LayerWeights& layer,
+    const ModelConfig& config
+) {
+    const std::vector<double> x_norm1 = rmsnorm(x);
+    const std::vector<double> q = linear(x_norm1, layer.attn_wq, config.n_embd);
+    layer_step->k = linear(x_norm1, layer.attn_wk, config.n_embd);
+    layer_step->v = linear(x_norm1, layer.attn_wv, config.n_embd);
+
+    std::vector<double> x_attn(config.n_embd, 0.0);
+
+    for (int head = 0; head < config.n_head; ++head) {
+        const int head_start = head * config.head_dim();
+        std::vector<double> attn_logits(pos + 1, 0.0);
+        for (int t = 0; t <= pos; ++t) {
+            const std::vector<double>& past_k = cache[t].layers[layer_idx].k;
+            double dot = 0.0;
+            for (int j = 0; j < config.head_dim(); ++j) {
+                dot += q[head_start + j] * past_k[head_start + j];
+            }
+            attn_logits[t] = dot / std::sqrt(static_cast<double>(config.head_dim()));
+        }
+
+        const std::vector<double> attn_weights = softmax(attn_logits);
+        for (int t = 0; t <= pos; ++t) {
+            const std::vector<double>& past_v = cache[t].layers[layer_idx].v;
+            const double weight = attn_weights[t];
+            for (int j = 0; j < config.head_dim(); ++j) {
+                x_attn[head_start + j] += weight * past_v[head_start + j];
+            }
+        }
+    }
+
+    return linear(x_attn, layer.attn_wo, config.n_embd);
+}
+
 KernelResult forward_pass(const Model& model, const std::vector<int>& tokens) {
     // Input: model weights plus one tokenized sequence such as [BOS, a, n, n, a, BOS].
     // Transformation: run embeddings, transformer blocks, and next-token scoring while caching activations.
@@ -126,38 +167,8 @@ KernelResult forward_pass(const Model& model, const std::vector<int>& tokens) {
             const LayerWeights& layer = model.layers[layer_idx];
             LayerStepCache& layer_step = step_cache.layers[layer_idx];
             const std::vector<double> x_residual = x;
-            const std::vector<double> x_norm1 = rmsnorm(x);
-            const std::vector<double> q = linear(x_norm1, layer.attn_wq, config.n_embd);
-            layer_step.k = linear(x_norm1, layer.attn_wk, config.n_embd);
-            layer_step.v = linear(x_norm1, layer.attn_wv, config.n_embd);
-            std::vector<double> x_attn(config.n_embd, 0.0);
-
-            // Input: the current hidden state plus cached keys/values from earlier positions.
-            // Transformation: build Q/K/V, compute causal attention weights, and mix prior value vectors.
-            // Output: an attention-informed hidden vector for this layer.
-            for (int head = 0; head < config.n_head; ++head) {
-                const int head_start = head * config.head_dim();
-                std::vector<double> attn_logits(pos + 1, 0.0);
-                for (int t = 0; t <= pos; ++t) {
-                    const std::vector<double>& past_k = cache[t].layers[layer_idx].k;
-                    double dot = 0.0;
-                    for (int j = 0; j < config.head_dim(); ++j) {
-                        dot += q[head_start + j] * past_k[head_start + j];
-                    }
-                    attn_logits[t] = dot / std::sqrt(static_cast<double>(config.head_dim()));
-                }
-
-                const std::vector<double> attn_weights = softmax(attn_logits);
-                for (int t = 0; t <= pos; ++t) {
-                    const std::vector<double>& past_v = cache[t].layers[layer_idx].v;
-                    const double weight = attn_weights[t];
-                    for (int j = 0; j < config.head_dim(); ++j) {
-                        x_attn[head_start + j] += weight * past_v[head_start + j];
-                    }
-                }
-            }
-
-            const std::vector<double> attn_proj = linear(x_attn, layer.attn_wo, config.n_embd);
+            const std::vector<double> attn_proj =
+                attention_sublayer(cache, layer_idx, pos, x, &layer_step, layer, config);
             const std::vector<double> x_mid = add_vectors(x_residual, attn_proj);
             const std::vector<double> x_norm2 = rmsnorm(x_mid);
             std::vector<double> relu = linear(x_norm2, layer.mlp_fc1, config.mlp_dim());

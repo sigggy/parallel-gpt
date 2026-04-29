@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -227,6 +228,7 @@ int run_validate(const CliOptions& options) {
 }
 
 int run_benchmark(const CliOptions& options) {
+    const auto benchmark_start = std::chrono::steady_clock::now();
     if (options.dataset.empty()) {
         throw std::runtime_error("--dataset is required for benchmark mode");
     }
@@ -250,19 +252,27 @@ int run_benchmark(const CliOptions& options) {
     // Transformation: tokenize each name and run one forward pass per example.
     // Output: the loss from the last processed document, which is printed for benchmarking.
     double last_loss = 0.0;
+    double forward_pass_seconds_cumulative = 0.0;
     std::string last_doc;
     for (int step = 0; step < steps; ++step) {
         last_doc = docs[step];
         const std::vector<int> tokens = encode_doc(last_doc, vocab, static_cast<int>(uchars.size()));
+        const auto forward_start = std::chrono::steady_clock::now();
         last_loss = run_forward(model, tokens).loss;
+        const auto forward_end = std::chrono::steady_clock::now();
+        forward_pass_seconds_cumulative += std::chrono::duration<double>(forward_end - forward_start).count();
     }
+    const double total_program_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - benchmark_start).count();
 
     std::cout << "mode=benchmark "
               << "preset=" << options.preset << ' '
               << "requested_steps=" << requested_steps << ' '
               << "steps=" << steps << ' '
               << "last_doc=" << last_doc << ' '
-              << "loss=" << std::setprecision(8) << last_loss << '\n';
+              << "loss=" << std::setprecision(8) << last_loss << ' '
+              << "forward_pass_seconds_cumulative=" << std::setprecision(8) << forward_pass_seconds_cumulative << ' '
+              << "total_program_seconds=" << std::setprecision(8) << total_program_seconds << '\n';
     return 0;
 }
 

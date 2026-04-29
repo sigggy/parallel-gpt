@@ -1,0 +1,105 @@
+\documentclass[aspectratio=169]{beamer}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{array}
+\usepackage{ragged2e}
+
+\usetheme{Pittsburgh}
+\usecolortheme{default}
+\setbeamertemplate{headline}{\vspace{0.4cm}}
+\setbeamertemplate{frametitle}{
+  \begin{beamercolorbox}[wd=\paperwidth,leftskip=0.5cm,rightskip=0.3cm]{frametitle}
+    \usebeamerfont{frametitle}\insertframetitle
+  \end{beamercolorbox}
+  \vspace{0.15cm}
+}
+\setbeamertemplate{navigation symbols}{}
+\definecolor{SNBlue}{HTML}{2A4F7A}
+\definecolor{SNGold}{HTML}{C69C3F}
+\definecolor{SNGray}{HTML}{4F5D6B}
+\definecolor{SNLight}{HTML}{F4F6F8}
+\definecolor{SNAccent}{HTML}{B54A4A}
+
+\setbeamercolor{palette primary}{bg=SNBlue,fg=white}
+\setbeamercolor{palette secondary}{bg=SNGray,fg=white}
+\setbeamercolor{palette tertiary}{bg=SNBlue,fg=white}
+\setbeamercolor{palette quaternary}{bg=SNGray,fg=white}
+\setbeamercolor{background canvas}{bg=white}
+\setbeamercolor{normal text}{fg=black,bg=white}
+\setbeamercolor{structure}{fg=SNBlue}
+\setbeamercolor{title}{fg=SNBlue}
+\setbeamercolor{frametitle}{fg=SNBlue,bg=white}
+\setbeamercolor{block title}{bg=SNBlue,fg=white}
+\setbeamercolor{block body}{bg=SNLight,fg=black}
+\setbeamercolor{alerted text}{fg=SNAccent}
+\setbeamercolor{footline}{fg=SNGray,bg=white}
+\setbeamerfont{title}{series=\bfseries,size=\Large}
+\setbeamerfont{frametitle}{series=\bfseries}
+\setbeamerfont{footline}{size=\scriptsize}
+
+\setbeamertemplate{footline}{%
+    \leavevmode%
+    \hbox to \paperwidth{%
+        \hfill%
+        \usebeamerfont{footline}%
+        \usebeamercolor[fg]{footline}%
+        \insertsectionhead%
+        \hspace{0.5cm}%
+    }%
+    \vspace{0.2cm}%
+}
+
+\graphicspath{{../project_report/figures/}}
+
+\pdfstringdefDisableCommands{%
+    \def\translate#1{#1}%
+}
+
+\newcommand{\takeaway}[1]{%
+    {\footnotesize\color{SNAccent}\textbf{Key point.} #1}
+}
+
+\newcommand{\sectiontransition}[2]{%
+    \begin{frame}[plain]
+        \vfill
+        \begin{center}
+            {\fontsize{26}{30}\selectfont\color{SNBlue}\textbf{#1}\par}
+        \end{center}
+        \vfill
+    \end{frame}
+}
+
+\title{Parralizing Karparthy's Min GPT}
+\subtitle{CSCI 563}
+\author{Jack "Siggy" Sigler, Dawson Mathews, Sam Abderholden}
+\institute{Colorado School of Mines}
+\date{\today}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}{Introduction Of The Problem}
+\end{frame}
+
+\begin{frame}{Serial Implementation And Analysis}
+\end{frame}
+
+\begin{frame}{Parallelization Strategy}
+\end{frame}
+
+\begin{frame}{Performance Evaluation Strategy}
+\end{frame}
+
+\begin{frame}{Optimization Strategy}
+\end{frame}
+
+\end{document}

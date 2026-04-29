@@ -1,0 +1,26 @@
+❯ /usr/bin/time -l build/serial_cpp \
+  --mode benchmark \
+  --dataset training_data/datasets/names.txt \
+  --preset medium \
+  --num-steps 4000
+mode=benchmark preset=medium requested_steps=4000 steps=4000 last_doc=harli loss=4.705967
+        6.41 real         6.17 user         0.02 sys
+             7208960  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 629  page reclaims
+                   1  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   2  voluntary context switches
+                2864  involuntary context switches
+         33766175292  instructions retired
+         21409258626  cycles elapsed
+             6997120  peak memory footprint
+
+

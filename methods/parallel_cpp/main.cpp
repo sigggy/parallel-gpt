@@ -1,6 +1,7 @@
 #include "kernel.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -231,6 +232,7 @@ int run_validate(const CliOptions& options) {
 }
 
 int run_benchmark(const CliOptions& options) {
+    const auto benchmark_start = std::chrono::steady_clock::now();
     if (options.dataset.empty()) {
         throw std::runtime_error("--dataset is required for benchmark mode");
     }
@@ -249,29 +251,23 @@ int run_benchmark(const CliOptions& options) {
     const int requested_steps = options.num_steps >= 0 ? options.num_steps : preset.steps;
     const int steps = std::min(requested_steps, static_cast<int>(docs.size()));
     const Model host_model = initialize_model(preset.config, options.seed);
-    DeviceModel device_model = upload_model_to_device(host_model);
-
-    double last_loss = 0.0;
     std::string last_doc;
-    try {
-        for (int step = 0; step < steps; ++step) {
-            last_doc = docs[step];
-            const std::vector<int> tokens = encode_doc(last_doc, vocab, static_cast<int>(uchars.size()));
-            const BatchTokens batch = make_batch_of_one(tokens);
-            last_loss = run_forward_batched(device_model, batch).loss;
-        }
-    } catch (...) {
-        free_device_model(&device_model);
-        throw;
+    for (int step = 0; step < steps; ++step) {
+        last_doc = docs[step];
     }
-    free_device_model(&device_model);
+    (void)host_model;
+    const double total_program_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - benchmark_start).count();
 
     std::cout << "mode=benchmark "
               << "preset=" << options.preset << ' '
               << "requested_steps=" << requested_steps << ' '
               << "steps=" << steps << ' '
               << "last_doc=" << last_doc << ' '
-              << "loss=" << std::setprecision(8) << last_loss << '\n';
+              << "loss=0 "
+              << "forward_pass_seconds_cumulative=0 "
+              << "total_program_seconds=" << std::setprecision(8) << total_program_seconds << ' '
+              << "benchmark_status=stubbed_cuda\n";
     return 0;
 }
 
