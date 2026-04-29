@@ -24,3 +24,29 @@ mode=benchmark preset=medium requested_steps=4000 steps=4000 last_doc=harli loss
              6997120  peak memory footprint
 
 
+This is exactly what you wanted. Now the profile is actually telling a story.
+
+What the new trace says
+
+Total runtime: 6.20s
+
+Inside forward_pass:
+
+MLP (biggest chunk)
+project_mlp_fc2 → 2.48s (40.0%)
+project_mlp_fc1 → 1.73s (27.8%)
+
+That’s ~68% of total runtime just in MLP projections.
+
+Attention projections
+project_attention_output → 473ms (7.6%)
+project_attention_value → 457ms (7.4%)
+project_attention_query → 451ms (7.3%)
+project_attention_key → 417ms (6.7%)
+
+That’s ~29% total for attention linear layers.
+
+Final projection
+project_lm_head → 52ms (0.8%)
+
+Basically negligible compared to the rest.
